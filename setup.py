@@ -345,7 +345,6 @@ class CachedWheelsCommand(_bdist_wheel):
 
 setup(
     packages=find_packages(),
-    setup_requires=["torch>=2.0.0"],
     install_requires=requirements,
     extras_require={
         "test": ["pytest>=8.2.2", "parameterized"],
