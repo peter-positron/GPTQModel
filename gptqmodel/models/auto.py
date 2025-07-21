@@ -127,6 +127,7 @@ from .definitions.xverse import XverseGPTQ  # noqa: E402
 from .definitions.yi import YiGPTQ  # noqa: E402
 from .definitions.falcon_h1 import FalconH1GPTQ  # noqa: E402
 from .definitions.pangu_alpha import PanguAlphaGPTQ  # noqa: E402
+from .definitions.dual_stream_roformer import DualStreamRoFormerGPTQ  # noqa: E402
 
 # make quants and inference more determinisitc
 torch.manual_seed(787)
@@ -203,6 +204,7 @@ MODEL_MAP = {
     "gpt_pangu": PanguAlphaGPTQ,
     "ernie4_5": ERNIE4_5GPTQ,
     "ernie4_5_moe": ERNIE4_5_MOEGPTQ,
+    "dual_stream_roformer": DualStreamRoFormerGPTQ,
 }
 
 SUPPORTED_MODELS = list(MODEL_MAP.keys())
