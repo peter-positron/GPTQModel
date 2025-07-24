@@ -238,25 +238,26 @@ class BaseGPTQModel(nn.Module):
         too_short_calibration_data_count = 0
         for example in calibration_dataset:
             input_ids = _convert_tensor_to_list(example["input_ids"])
-            attention_mask = _convert_tensor_to_list(example["attention_mask"])
-
+            
             # filter if input_ids is too short
             if len(input_ids[0]) <= calibration_data_min_length:
                 too_short_calibration_data_count += 1
                 continue
 
-            new_calibration_dataset.append(
-                {
-                    "input_ids": input_ids,
-                    "attention_mask": attention_mask,
-                }
-            )
+            new_example = {}
+            for k, v in example.items():
+                new_example[k] = v
+            new_calibration_dataset.append(new_example)
 
         if too_short_calibration_data_count > 0:
             log.warn(f"Quantize: {too_short_calibration_data_count} input_ids with length <= {calibration_data_min_length} were removed. "
                      f"Use quantize(calibration_data_min_length={calibration_data_min_length}) to set a custom minimum length.")
 
+        pad_token_id = self.tokenizer.pad_token_id if self.tokenizer else 0
+
         if calibration_dataset_concat_size:
+            if self.tokenizer is None:
+                raise ValueError("A tokenizer must be provided to use `calibration_dataset_concat_size`.")
             concatenated_data = []
             input_ids_buff = []
             attention_mask_buff = []
@@ -313,7 +314,7 @@ class BaseGPTQModel(nn.Module):
             if input_ids_buff:
                 padding_length = calibration_dataset_concat_size - len(input_ids_buff)
                 if padding_length > 0:
-                    input_ids_buff.extend([self.tokenizer.pad_token_id] * padding_length)
+                    input_ids_buff.extend([pad_token_id] * padding_length)
                     attention_mask_buff.extend([0] * padding_length)
                 concatenated_data.append({
                     "input_ids": [input_ids_buff],
@@ -324,7 +325,7 @@ class BaseGPTQModel(nn.Module):
 
         if self.support_batch_quantize:
             new_calibration_dataset_batched = [
-                collate_data(new_calibration_dataset[start: start + batch_size], self.tokenizer.pad_token_id)
+                collate_data(new_calibration_dataset[start: start + batch_size], pad_token_id)
                 for start in range(0, len(new_calibration_dataset), batch_size)
             ]
         else:
@@ -814,19 +815,13 @@ class BaseGPTQModel(nn.Module):
             layer_inputs.append(layer_input)
 
             # Keyword arguments.
-            if kwargs.get("attention_mask") is not None:
-                attention_masks.append(kwargs["attention_mask"].to(device=data_device))
-            else:
-                attention_masks.append(None)
-
-            pos_ids = kwargs.get("position_ids", None)
-            if pos_ids is not None:
-                position_ids.append(move_to(pos_ids, device=data_device))
-            one_kwargs = {}
-            for (k, v) in kwargs.items():  # make sure other arguments also be captured
-                if k not in ["hidden_states", "attention_mask", "position_ids"]:
-                    one_kwargs[k] = nested_move_to(v, device=data_device)
-            layer_input_kwargs.append(one_kwargs)
+            kwargs_copy = {}
+            for k, v in kwargs.items():
+                if isinstance(v, torch.Tensor):
+                    kwargs_copy[k] = v.to(device=data_device)
+                else:
+                    kwargs_copy[k] = v
+            layer_input_kwargs.append(kwargs_copy)
 
             raise ValueError
 

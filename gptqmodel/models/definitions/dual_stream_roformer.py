@@ -81,8 +81,9 @@ class DualStreamRoFormerGPTQ(BaseGPTQModel):
             ]
 
     def should_quantize_layer(self, layer_name: str) -> bool:
-        # Do not quantize the last layer if it's a single-stream layer
-        if "single_blocks" in layer_name:
+        # Do not quantize the last dual-stream layer (22) as its structure is different.
+        # Also, do not quantize single-stream layers.
+        if "transformer.dual_blocks.22" in layer_name or "transformer.single_blocks" in layer_name:
             return False
         return True
     

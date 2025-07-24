@@ -141,7 +141,7 @@ def ModelWriter(cls):
                 w.writerows([[entry.get(PROCESS_LOG_LAYER), entry.get(PROCESS_LOG_MODULE), entry.get(QUANT_LOG_LOSS),
                               entry.get(QUANT_LOG_DAMP), entry.get(PROCESS_LOG_TIME)] for entry in self.quant_log])
 
-        pre_quantized_size_mb = get_model_files_size(self.model_local_path)
+        pre_quantized_size_mb = get_model_files_size(self.model_local_path) if self.model_local_path else 0
         pre_quantized_size_gb = pre_quantized_size_mb / 1024
 
         quantizers = [f"{META_QUANTIZER_GPTQMODEL}:{__version__}"]

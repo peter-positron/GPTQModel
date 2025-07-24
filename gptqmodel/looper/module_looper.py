@@ -37,6 +37,7 @@ from ..utils.model import (find_modules, get_device, get_module, get_module_by_n
 from ..utils.torch import (ALL_DEVICES, ALL_STREAMS, CPU, DEFAULT_BALANCE_STRATEGY,
                            HAS_CUDA, BalanceStrategy, device_next, device_next_reset,
                            torch_devices, torch_empty_cache, torch_streamCtx, torch_sync)
+from cube3d.model.transformers.cache import Cache
 
 log = setup_logger()
 
@@ -103,27 +104,22 @@ class ModuleLooper():
         handle = layers[0].register_forward_pre_hook(store_input_hook, with_kwargs=True)
         is_ovis = self.gptq_model.__class__.__name__ == "OvisGPTQ"
         self.gptq_model.pre_quantize_generate_hook_start()
+        
+        if hasattr(self.gptq_model, 'prepare_dataset') and self.gptq_model.prepare_dataset is not None:
+             calibration_data = self.gptq_model.prepare_dataset(
+                calibration_dataset=calibration_data,
+                batch_size=1  # Assuming batch size of 1 for simplicity, adjust if needed
+            )
+
         for example in calibration_data:
             for k, v in example.items():
-                if str(type(layers[0])) == "<class 'transformers.models.qwen2_5_omni.modeling_qwen2_5_omni.Qwen2_5OmniDecoderLayer'>":
-                    data_device = self.gptq_model.quantize_config.device
-                else:
-                    data_device = self.gptq_model.quantize_config.device if k == "pixel_values" else cur_layer_device
-                if isinstance(v, list):
-                    for index in range(len(v)):
-                        if len(v[index].shape) == 1:
-                            v[index] = v[index].unsqueeze(0)
-                        v[index] = move_to(v[index].to(self.gptq_model.model.visual_tokenizer.dtype) if is_ovis else v[index],
-                                                  device=data_device)
-                else:
-                    if len(v.shape) == 1:
-                        v = v.unsqueeze(0)
-                    example[k] = move_to(v, device=data_device)
+                # Move to device
+                data_device = cur_layer_device
+                if isinstance(v, torch.Tensor):
+                    example[k] = move_to(v, data_device)
+
             try:
-                if str(type(layers[0])) == "<class 'transformers.models.qwen2_5_omni.modeling_qwen2_5_omni.Qwen2_5OmniDecoderLayer'>":
-                    self.gptq_model.model.generate(**example, return_audio=False)
-                else:
-                    self.gptq_model.model(**example)
+                self.gptq_model(**example)
             except ValueError:
                 pass
         self.gptq_model.pre_quantize_generate_hook_end()
@@ -323,18 +319,20 @@ class ModuleLooper():
                         mask = attention_masks[j]
                         layer_attention_mask = mask if mask is None else move_to(mask, device=cur_layer_device, stream=False)
 
-                        additional_layer_inputs = {"attention_mask": layer_attention_mask} if self.support_batch_quantize else {}
-                        layer_position_ids = (
-                            None if not position_ids else move_to(position_ids[j], device=cur_layer_device, stream=False)
-                        )
+                        additional_layer_inputs = {}
+                        if self.support_batch_quantize and layer_attention_mask is not None:
+                            additional_layer_inputs["attention_mask"] = layer_attention_mask
 
-                        if layer_position_ids is not None:
-                            additional_layer_inputs["position_ids"] = layer_position_ids
                         for k, v in layer_input_kwargs[j].items():
                             additional_layer_inputs[k] = nested_move_to(v, device=cur_layer_device, stream=False)
 
                         # sync above stream copies
                         #torch_sync(device=cur_layer_device)
+                        if 'kv_cache' in additional_layer_inputs and isinstance(additional_layer_inputs['kv_cache'], torch.Tensor):
+                            additional_layer_inputs['kv_cache'] = Cache(
+                                key_states=additional_layer_inputs['kv_cache'],
+                                value_states=torch.zeros_like(additional_layer_inputs['kv_cache']),
+                            )
 
                         # reuse_kv is a flag to reuse the kv cache, only for the hamba model
                         if hasattr(module, "reuse_kv"):
@@ -452,11 +450,9 @@ class ModuleLooper():
                         mask = attention_masks[j]
                         layer_attention_mask = mask if mask is None else move_to(mask, device=cur_layer_device)
 
-                        additional_layer_inputs = {"attention_mask": layer_attention_mask} if self.support_batch_quantize else {}
-
-                        layer_position_ids = None if not position_ids else move_to(position_ids[j], device=cur_layer_device)
-                        if layer_position_ids is not None:
-                            additional_layer_inputs["position_ids"] = layer_position_ids
+                        additional_layer_inputs = {}
+                        if self.support_batch_quantize and layer_attention_mask is not None:
+                            additional_layer_inputs["attention_mask"] = layer_attention_mask
 
                         for k, v in layer_input_kwargs[j].items():
                             additional_layer_inputs[k] = nested_move_to(v, device=cur_layer_device)

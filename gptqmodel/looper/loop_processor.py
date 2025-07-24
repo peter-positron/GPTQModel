@@ -142,11 +142,15 @@ class LoopProcessor:
             for row in calibration_dataset:
                 input_ids = row["input_ids"]
                 if isinstance(input_ids, torch.Tensor):
-                    if input_ids.dim() <= 2:
+                    # For 3D tensors, we can't easily determine the "length",
+                    # so we'll just use the size of the first dimension.
+                    if input_ids.dim() == 3:
+                        input_ids_length = input_ids.shape[0] * input_ids.shape[1]
+                    elif input_ids.dim() <= 2:
                         input_ids_length = input_ids.shape[-1]
                     else:
                         raise ValueError(
-                            "Expected a 1-dimensional tensor or 2-dimensional tensor for 'input_ids', but got a tensor with {0} dimensions.".format(
+                            "Expected a 1-dimensional, 2-dimensional, or 3-dimensional tensor for 'input_ids', but got a tensor with {0} dimensions.".format(
                                 input_ids.dim()))
                 else:
                     input_ids_length = len(input_ids)

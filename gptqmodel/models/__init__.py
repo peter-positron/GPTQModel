@@ -18,3 +18,31 @@ from ._const import get_best_device
 from .auto import MODEL_MAP, GPTQModel
 from .base import BaseGPTQModel
 from .definitions import *
+from .gpt_bigcode import GPTBigCodeGPTQ
+from .gptj import GPTJGPTQ
+from .gptneox import GPTNeoXGPTQ
+from .internlm import InternLMGPTQ
+from .llama import LlamaGPTQ
+from .longllama import LongLlamaGPTQ
+from .mistral import MistralGPTQ
+from .mixtral import MixtralGPTQ
+from .mpt import MPTGPTQ
+from .qwen import QwenGPTQ
+from .qwen2 import Qwen2GPTQ
+from .qwen2_moe import Qwen2MoeGPTQ
+from .starcoder2 import Starcoder2GPTQ
+from .dual_stream_roformer import DualStreamRoformerGPTQ
+
+GPTQ_MODEL_LIST = [
+    LlamaGPTQ,
+    MistralGPTQ,
+    MixtralGPTQ,
+    GPTBigCodeGPTQ,
+    GPTJGPTQ,
+    GPTNeoXGPTQ,
+    QwenGPTQ,
+    Qwen2GPTQ,
+    Qwen2MoeGPTQ,
+    Starcoder2GPTQ,
+    DualStreamRoformerGPTQ
+]

@@ -17,7 +17,7 @@
 import copy
 import random
 from functools import partial
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Any
 
 import torch
 from torch import LongTensor, Tensor
@@ -153,26 +153,81 @@ def make_data_block(
     return new_samples
 
 
-def collate_data(batch: List[Dict[str, List[List[int]]]], pad_token_id: int) -> Dict[str, Tensor]:
-    def pad_batch(block: LongTensor, pads: Tensor):
-        return torch.cat((block, pads.to(block.device)), dim=-1)
+def collate_data(
+    samples: List[Dict[str, List[int]]],
+    pad_token_id: int,
+    pad_keys: List[str] = ["input_ids", "attention_mask"],
+) -> Dict[str, torch.Tensor]:
+    if not isinstance(samples, list) or not all(isinstance(s, dict) for s in samples):
+        # Already collated
+        if isinstance(samples, dict) and all(isinstance(s, torch.Tensor) for s in samples.values()):
+            return samples
+        # Not a list of dicts, let's just return it
+        return samples
 
-    input_ids = [LongTensor(block["input_ids"]) for block in batch]
-    attention_masks = [LongTensor(block["attention_mask"]) for block in batch]
+    if len(samples) == 0:
+        return {}
 
-    inp_max_len = max([block.size(-1) for block in input_ids])
+    def _get_value_at_first_key(sample: Dict[str, Any]):
+        return sample[list(sample.keys())[0]]
 
-    for i in range(len(batch)):
-        block_bsz, block_inp_len = input_ids[i].shape
-        pad_num = inp_max_len - block_inp_len
-        if pad_num > 0:
-            input_ids[i] = pad_batch(input_ids[i], torch.ones((block_bsz, pad_num)) * pad_token_id)
-            attention_masks[i] = pad_batch(attention_masks[i], torch.zeros((block_bsz, pad_num)))
+    first_sample_val = _get_value_at_first_key(samples[0])
+    if isinstance(first_sample_val, torch.Tensor):
+        return {key: torch.cat([d[key] for d in samples]) for key in samples[0].keys()}
 
-    return {
-        "input_ids": torch.cat(input_ids, dim=0).long(),
-        "attention_mask": torch.cat(attention_masks, dim=0).long(),
-    }
+    collated_samples = {}
+    for key in samples[0].keys():
+        if key not in pad_keys:
+            collated_samples[key] = [s[key] for s in samples]
+            continue
+
+        values = [s[key] for s in samples]
+        if not isinstance(values[0], (list, torch.Tensor)):
+            collated_samples[key] = torch.tensor(values, dtype=torch.long)
+            continue
+        if isinstance(values[0], list) and isinstance(values[0][0], int):
+            values = [torch.tensor(v, dtype=torch.long) for v in values]
+
+        input_ids = values
+        if isinstance(input_ids[0], list):
+            input_ids = [torch.tensor(i, dtype=torch.long) for i in input_ids]
+
+        if "input_ids" in key:
+            # Get the shape of the first tensor
+            first_tensor_shape = input_ids[0].shape
+            if len(first_tensor_shape) == 3:
+                # Handle 3D tensors
+                max_seq_len = max(t.shape[1] for t in input_ids)
+                feature_dim = first_tensor_shape[2]
+                padded_tensors = []
+                for t in input_ids:
+                    padding_needed = max_seq_len - t.shape[1]
+                    if padding_needed > 0:
+                        padding = torch.zeros((t.shape[0], padding_needed, feature_dim), dtype=t.dtype, device=t.device)
+                        padded_t = torch.cat([t, padding], dim=1)
+                    else:
+                        padded_t = t
+                    padded_tensors.append(padded_t)
+                collated_samples[key] = torch.cat(padded_tensors, dim=0)
+            else:
+                # Handle 2D tensors
+                max_len = max(len(i) for i in input_ids)
+                collated_samples[key] = torch.stack(
+                    [
+                        torch.cat((i, torch.tensor([pad_token_id] * (max_len - len(i)), dtype=torch.long)))
+                        for i in input_ids
+                    ]
+                )
+        elif "attention_mask" in key:
+            max_len = max(len(i) for i in input_ids)
+            collated_samples[key] = torch.stack(
+                [
+                    torch.cat((i, torch.tensor([0] * (max_len - len(i)), dtype=torch.long)))
+                    for i in input_ids
+                ]
+            )
+
+    return collated_samples
 
 
 def get_dataloader(
