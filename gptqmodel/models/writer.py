@@ -232,6 +232,9 @@ def ModelWriter(cls):
         # Use empty state_dict hack to bypass saving weights
         if hasattr(self.model, 'save_pretrained'):
             self.model.save_pretrained(save_dir, state_dict={}, is_main_process=True)
+        elif hasattr(self, 'save_pretrained'):
+            # Check if the GPTQModel wrapper has a custom save_pretrained
+            self.save_pretrained(save_dir, state_dict={}, is_main_process=True)
         else:
             # For custom models without save_pretrained, save config manually
             import json
@@ -243,6 +246,7 @@ def ModelWriter(cls):
         quantize_config.save_pretrained(save_dir)
 
         def debug_saved_config(path):
+            import json
             # List all files in the directory
             files = os.listdir(path)
             print("Files in directory:")
@@ -418,6 +422,7 @@ def ModelWriter(cls):
             if (not config_tokenizer_class.endswith("Fast")) and (
                 isinstance(self.tokenizer.tokenizer, PreTrainedTokenizerFast)
                 ):
+                import json
                 saved_tokenizer_config["tokenizer_class"] = saved_tokenizer_config["tokenizer_class"] + "Fast"
                 with open(os.path.join(save_dir, "tokenizer_config.json"), "w", encoding="utf-8") as f:
                     json.dump(saved_tokenizer_config, f, indent=2, ensure_ascii=False)
