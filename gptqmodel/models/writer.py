@@ -230,7 +230,14 @@ def ModelWriter(cls):
 
         # Save model config, including generation_config
         # Use empty state_dict hack to bypass saving weights
-        self.model.save_pretrained(save_dir, state_dict={}, is_main_process=True)
+        if hasattr(self.model, 'save_pretrained'):
+            self.model.save_pretrained(save_dir, state_dict={}, is_main_process=True)
+        else:
+            # For custom models without save_pretrained, save config manually
+            import json
+            config_path = os.path.join(save_dir, 'config.json')
+            with open(config_path, 'w') as f:
+                json.dump(config.to_dict() if hasattr(config, 'to_dict') else vars(config), f, indent=2)
 
         # Save `quantize_config.json`
         quantize_config.save_pretrained(save_dir)
@@ -387,12 +394,15 @@ def ModelWriter(cls):
         # If the saved model is a loaded quantized model, do not calculate the size diff.
         if not self.load_quantized_model:
             total_size_gb = total_size_mb / 1024
-            size_diff_mb = pre_quantized_size_mb - total_size_mb
-            size_diff_gb = size_diff_mb / 1024
-            percent_diff = (size_diff_mb / pre_quantized_size_mb) * 100
-            log.info(f"Pre-Quantized model size: {pre_quantized_size_mb:.2f}MB, {pre_quantized_size_gb:.2f}GB")
-            log.info(f"Quantized model size: {total_size_mb:.2f}MB, {total_size_gb:.2f}GB")
-            log.info(f"Size difference: {size_diff_mb:.2f}MB, {size_diff_gb:.2f}GB - {percent_diff:.2f}%")
+            if pre_quantized_size_mb > 0:
+                size_diff_mb = pre_quantized_size_mb - total_size_mb
+                size_diff_gb = size_diff_mb / 1024
+                percent_diff = (size_diff_mb / pre_quantized_size_mb) * 100
+                log.info(f"Pre-Quantized model size: {pre_quantized_size_mb:.2f}MB, {pre_quantized_size_gb:.2f}GB")
+                log.info(f"Quantized model size: {total_size_mb:.2f}MB, {total_size_gb:.2f}GB")
+                log.info(f"Size difference: {size_diff_mb:.2f}MB, {size_diff_gb:.2f}GB - {percent_diff:.2f}%")
+            else:
+                log.info(f"Quantized model size: {total_size_mb:.2f}MB, {total_size_gb:.2f}GB")
 
         # need to copy .py files for model/tokenizers not yet merged to HF transformers
         if self.trust_remote_code:
