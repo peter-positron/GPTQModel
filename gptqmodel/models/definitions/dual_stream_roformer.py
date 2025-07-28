@@ -72,8 +72,10 @@ class DualStreamRoFormerGPTQ(BaseGPTQModel):
 
     def get_layer_modules(self, layer_name: str) -> list:
         if "dual_blocks" in layer_name:
+            # Dual-stream layers use complex module structure
             return self.layer_modules
         else:
+            # Single-stream layers (single_blocks) use standard transformer structure
             return [
                 ["attn.c_qk", "attn.c_v"],
                 ["attn.c_proj"],
@@ -82,8 +84,8 @@ class DualStreamRoFormerGPTQ(BaseGPTQModel):
 
     def should_quantize_layer(self, layer_name: str) -> bool:
         # Do not quantize the last dual-stream layer (22) as its structure is different.
-        # Also, do not quantize single-stream layers.
-        if "transformer.dual_blocks.22" in layer_name or "transformer.single_blocks" in layer_name:
+        # Now allowing single-stream layers for optimal Tron FPGA performance.
+        if "transformer.dual_blocks.22" in layer_name:
             return False
         return True
     
