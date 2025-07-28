@@ -83,10 +83,10 @@ class DualStreamRoFormerGPTQ(BaseGPTQModel):
             ]
 
     def should_quantize_layer(self, layer_name: str) -> bool:
-        # Do not quantize the last dual-stream layer (22) as its structure is different.
-        # Now allowing single-stream layers for optimal Tron FPGA performance.
+        # Only exclude dual_blocks.22 by default (different architecture with cond_pre_only=True)
         if "transformer.dual_blocks.22" in layer_name:
             return False
+        # Now allowing single-stream layers for optimal Tron FPGA performance
         return True
     
     def forward(self, model, input_ids, attention_mask=None, **kwargs):
