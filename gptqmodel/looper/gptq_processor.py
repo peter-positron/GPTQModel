@@ -85,6 +85,53 @@ class GPTQProcessor(LoopProcessor):
             qcfg_clone.v2 = self.qcfg.dynamic_get(module.full_name, "v2", qcfg_clone.v2)
             qcfg_clone.v2_alpha = self.qcfg.dynamic_get(module.full_name, "v2_alpha", qcfg_clone.v2_alpha)
 
+        # Mixed precision overrides - these take priority over dynamic overrides
+        mixed_precision = getattr(self.qcfg, 'mixed_precision', False)
+        if mixed_precision and self.qcfg.bits < 8:
+            # Check if model has bbox support by looking for bbox_proj in the full name path
+            has_bbox = 'bbox_proj' in module.full_name or hasattr(self.qcfg, '_has_bbox') and self.qcfg._has_bbox
+            
+            sensitive_layers = ['shape_proj', 'text_proj', 'dual_blocks.22']
+            if has_bbox:
+                sensitive_layers.append('bbox_proj')
+                
+            # Check if this module is a sensitive layer
+            if any(layer_name in module.full_name for layer_name in sensitive_layers):
+                log.debug(f"Mixed precision: Overriding {module.full_name} from {qcfg_clone.bits} to 8 bits")
+                qcfg_clone.bits = 8
+                # Keep group size at 64 for consistency with mixed precision
+                qcfg_clone.group_size = 64
+                
+        # Apply layer-specific adjustments for dual stream architecture
+        if 'single_blocks' in module.full_name:
+            # Single blocks are more critical - use conservative settings
+            qcfg_clone.damp_percent = min(qcfg_clone.damp_percent * 1.5, 0.02)
+            qcfg_clone.group_size = min(qcfg_clone.group_size, 64)  # Smaller groups for better precision
+            
+        elif 'dual_blocks' in module.full_name:
+            # Dual blocks can handle more aggressive quantization
+            if 'attn' in module.full_name:
+                # Attention layers are sensitive
+                qcfg_clone.damp_percent = min(qcfg_clone.damp_percent * 1.2, 0.015)
+            elif 'mlp' in module.full_name:
+                # MLP layers are more robust
+                qcfg_clone.damp_percent = qcfg_clone.damp_percent * 0.8
+                
+        elif 'bbox_proj' in module.full_name:
+            # Bounding box projection is critical and often small - use very conservative settings
+            qcfg_clone.damp_percent = min(qcfg_clone.damp_percent * 5.0, 0.1)
+            qcfg_clone.group_size = max(64, qcfg_clone.group_size - (qcfg_clone.group_size % 64))  # Hardware: gs % 64 == 0
+            
+        elif any(proj in module.full_name for proj in ['shape_proj', 'text_proj']):
+            # Other projection layers need careful handling
+            qcfg_clone.damp_percent = min(qcfg_clone.damp_percent * 2.0, 0.025)
+            qcfg_clone.group_size = max(64, qcfg_clone.group_size - (qcfg_clone.group_size % 64))  # Hardware: gs % 64 == 0
+            
+        elif 'lm_head' in module.full_name:
+            # Output head is critical
+            qcfg_clone.damp_percent = min(qcfg_clone.damp_percent * 3.0, 0.03)
+            qcfg_clone.group_size = max(64, qcfg_clone.group_size - (qcfg_clone.group_size % 64))  # Hardware: gs % 64 == 0
+
         # store last used qcfg_dynamic
         self.qcfg_dynamic = qcfg_clone
 
