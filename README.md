@@ -17,6 +17,7 @@
 </p>
 
 ## Latest News
+* 07/31/2025 4.0.0-dev `main`: New Group Aware Reordering (GAR) support and prelim Pytorch 2.8 fused-ops for Intel XPU for up to 50% speedup. 
 * 07/03/2025 4.0.0-dev `main`: New Baidu Ernie and Huawei PanGu model support.
 * 07/02/2025 4.0.0-dev `main`: Gemma3 4B model compat fix.
 * 05/29/2025 4.0.0-dev `main`: Falcon H1 model support. Fixed Transformers `4.52+` compat with Qwen 2.5 VL models.
@@ -134,7 +135,7 @@ Native support support some of the most popular multi-modal models:
 | Ovis 1.6 + 2      | ✅ | 
 | Phi-4 MultiModal  | ✅ | 
 
-## GPTQ v2 quantization unlocks useful utral-low bit quantization
+## GPTQ v2 quantization unlocks useful ultra-low bit quantization
 
 <div align=center>
 <img src=https://github.com/user-attachments/assets/8e627922-0b73-4e44-b3e2-c01def5301f9 width=350>
