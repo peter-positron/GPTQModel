@@ -237,7 +237,6 @@ def ModelWriter(cls):
             self.save_pretrained(save_dir, state_dict={}, is_main_process=True)
         else:
             # For custom models without save_pretrained, save config manually
-            import json
             config_path = os.path.join(save_dir, 'config.json')
             with open(config_path, 'w') as f:
                 json.dump(config.to_dict() if hasattr(config, 'to_dict') else vars(config), f, indent=2)
@@ -246,7 +245,6 @@ def ModelWriter(cls):
         quantize_config.save_pretrained(save_dir)
 
         def debug_saved_config(path):
-            import json
             # List all files in the directory
             files = os.listdir(path)
             print("Files in directory:")
@@ -422,7 +420,6 @@ def ModelWriter(cls):
             if (not config_tokenizer_class.endswith("Fast")) and (
                 isinstance(self.tokenizer.tokenizer, PreTrainedTokenizerFast)
                 ):
-                import json
                 saved_tokenizer_config["tokenizer_class"] = saved_tokenizer_config["tokenizer_class"] + "Fast"
                 with open(os.path.join(save_dir, "tokenizer_config.json"), "w", encoding="utf-8") as f:
                     json.dump(saved_tokenizer_config, f, indent=2, ensure_ascii=False)

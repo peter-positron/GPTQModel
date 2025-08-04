@@ -37,7 +37,6 @@ from ..utils.model import (find_modules, get_device, get_module, get_module_by_n
 from ..utils.torch import (ALL_DEVICES, ALL_STREAMS, CPU, DEFAULT_BALANCE_STRATEGY,
                            HAS_CUDA, BalanceStrategy, device_next, device_next_reset,
                            torch_devices, torch_empty_cache, torch_streamCtx, torch_sync)
-from cube3d.model.transformers.cache import Cache
 
 log = setup_logger()
 
@@ -328,11 +327,12 @@ class ModuleLooper():
 
                         # sync above stream copies
                         #torch_sync(device=cur_layer_device)
-                        if 'kv_cache' in additional_layer_inputs and isinstance(additional_layer_inputs['kv_cache'], torch.Tensor):
-                            additional_layer_inputs['kv_cache'] = Cache(
-                                key_states=additional_layer_inputs['kv_cache'],
-                                value_states=torch.zeros_like(additional_layer_inputs['kv_cache']),
-                            )
+                        # REMOVED: experimental cube3d Cache usage
+                        # if 'kv_cache' in additional_layer_inputs and isinstance(additional_layer_inputs['kv_cache'], torch.Tensor):
+                        #     additional_layer_inputs['kv_cache'] = Cache(
+                        #         key_states=additional_layer_inputs['kv_cache'],
+                        #         value_states=torch.zeros_like(additional_layer_inputs['kv_cache']),
+                        #     )
 
                         # reuse_kv is a flag to reuse the kv cache, only for the hamba model
                         if hasattr(module, "reuse_kv"):
