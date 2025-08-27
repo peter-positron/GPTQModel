@@ -77,15 +77,18 @@ from .definitions.decilm import DeciLMGPTQ  # noqa: E402
 from .definitions.deepseek_v2 import DeepSeekV2GPTQ  # noqa: E402
 from .definitions.deepseek_v3 import DeepSeekV3GPTQ  # noqa: E402
 from .definitions.dream import DreamGPTQ  # noqa: E402
-from .definitions.exaone import ExaoneGPTQ  # noqa: E402
 from .definitions.ernie4_5 import ERNIE4_5GPTQ  # noqa: E402
 from .definitions.ernie4_5_moe import ERNIE4_5_MOEGPTQ  # noqa: E402
+from .definitions.exaone import ExaoneGPTQ  # noqa: E402
+from .definitions.falcon_h1 import FalconH1GPTQ  # noqa: E402
 from .definitions.gemma import GemmaGPTQ  # noqa: E402
 from .definitions.gemma2 import Gemma2GPTQ  # noqa: E402
 from .definitions.gemma3 import Gemma3ForConditionalGenerationGPTQ, Gemma3GPTQ  # noqa: E402
 from .definitions.glm import GLM  # noqa: E402
+from .definitions.glm4_moe import GLM4MoEGPTQ  # noqa: E402
 from .definitions.gpt2 import GPT2GPTQ  # noqa: E402
 from .definitions.gpt_bigcode import GPTBigCodeGPTQ  # noqa: E402
+from .definitions.gpt_neo import GPTNeoGPTQ  # noqa: E402
 from .definitions.gpt_neox import GPTNeoXGPTQ  # noqa: E402
 from .definitions.gptj import GPTJGPTQ  # noqa: E402
 from .definitions.granite import GraniteGPTQ  # noqa: E402
@@ -108,26 +111,25 @@ from .definitions.mpt import MPTGPTQ  # noqa: E402
 from .definitions.olmo2 import Olmo2GPTQ  # noqa: E402
 from .definitions.opt import OPTGPTQ  # noqa: E402
 from .definitions.ovis import OvisGPTQ  # noqa: E402
+from .definitions.pangu_alpha import PanguAlphaGPTQ  # noqa: E402
 from .definitions.phi import PhiGPTQ  # noqa: E402
 from .definitions.phi3 import Phi3GPTQ, PhiMoEGPTQForCausalLM  # noqa: E402
 from .definitions.phi4 import Phi4MMGPTQ  # noqa: E402
 from .definitions.qwen import QwenGPTQ  # noqa: E402
 from .definitions.qwen2 import Qwen2GPTQ  # noqa: E402
-from .definitions.qwen2_5_vl import Qwen2_5_VLGPTQ  # noqa: E402
 from .definitions.qwen2_5_omni import Qwen2_5_OmniGPTQ
+from .definitions.qwen2_5_vl import Qwen2_5_VLGPTQ  # noqa: E402
 from .definitions.qwen2_moe import Qwen2MoeGPTQ  # noqa: E402
 from .definitions.qwen2_vl import Qwen2VLGPTQ  # noqa: E402
 from .definitions.qwen3 import Qwen3GPTQ  # noqa: E402
 from .definitions.qwen3_moe import Qwen3MoeGPTQ  # noqa: E402
 from .definitions.rw import RWGPTQ  # noqa: E402
+from .definitions.seed_oss import SeedOSSGPTQ  # noqa: E402
 from .definitions.stablelmepoch import StableLMEpochGPTQ  # noqa: E402
 from .definitions.starcoder2 import Starcoder2GPTQ  # noqa: E402
 from .definitions.telechat2 import TeleChat2GPTQ
 from .definitions.xverse import XverseGPTQ  # noqa: E402
 from .definitions.yi import YiGPTQ  # noqa: E402
-from .definitions.falcon_h1 import FalconH1GPTQ  # noqa: E402
-from .definitions.pangu_alpha import PanguAlphaGPTQ  # noqa: E402
-# Removed beta model: from .definitions.dual_stream_roformer import DualStreamRoFormerGPTQ  # noqa: E402
 
 # make quants and inference more determinisitc
 torch.manual_seed(787)
@@ -137,6 +139,7 @@ numpy.random.seed(787)
 MODEL_MAP = {
     "dream": DreamGPTQ,
     "bloom": BloomGPTQ,
+    "gpt_neo": GPTNeoGPTQ,
     "gpt_neox": GPTNeoXGPTQ,
     "gptj": GPTJGPTQ,
     "gpt2": GPT2GPTQ,
@@ -146,6 +149,7 @@ MODEL_MAP = {
     "chatglm": ChatGLM,
     "glm": GLM,
     "glm4": GLM,
+    "glm4_moe": GLM4MoEGPTQ,
     "gpt_bigcode": GPTBigCodeGPTQ,
     "codegen": CodeGenGPTQ,
     "cohere": CohereGPTQ,
@@ -204,7 +208,7 @@ MODEL_MAP = {
     "gpt_pangu": PanguAlphaGPTQ,
     "ernie4_5": ERNIE4_5GPTQ,
     "ernie4_5_moe": ERNIE4_5_MOEGPTQ,
-    # Removed beta model: "dual_stream_roformer": DualStreamRoFormerGPTQ,
+    "seed_oss": SeedOSSGPTQ,
 }
 
 SUPPORTED_MODELS = list(MODEL_MAP.keys())

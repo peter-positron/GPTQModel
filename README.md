@@ -17,6 +17,10 @@
 </p>
 
 ## Latest News
+* 08/25/2025 4.1.0-dev `main`: GLM-4.5-Air model support. New experiemental `mock_quantization` config to skip complex computational code paths during quantization to accelerate model quant testing. 
+* 08/21/2025 [4.0.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v4.0.0): 🎉 New Group Aware Reordering (GAR) support. New models support: Bytedance Seed-OSS, Baidu Ernie, Huawei PanGu, Gemma3, Xiaomi Mimo, Qwen 3/MoE, Falcon H1, GPT-Neo. Memory leak and multiple model compatibility fixes related to Transformers >= 4.54. Python >= 3.13t free-threading support added with near N x GPU linear scaling for quantization of MoE models and also linear N x Cpu Core scaling of packing stage. Early access Pytorch 2.8 fused-ops on Intel XPU for up to 50% speedup.
+* 08/19/2025 4.0.0-dev `main`: Fix quantization memory usage due to some model's incorrect application of `config.use_cache` during inference. Fixed `Transformers` >= 4.54.0 compat which changed layer forward return signature for some models. 
+* 08/18/2025 4.0.0-dev `main`: GPT-Neo model support. Memory leak fix in error capture (stacktrace) and fixed `lm_head` quantization compatibility for many models.
 * 07/31/2025 4.0.0-dev `main`: New Group Aware Reordering (GAR) support and prelim Pytorch 2.8 fused-ops for Intel XPU for up to 50% speedup. 
 * 07/03/2025 4.0.0-dev `main`: New Baidu Ernie and Huawei PanGu model support.
 * 07/02/2025 4.0.0-dev `main`: Gemma3 4B model compat fix.
@@ -24,8 +28,14 @@
 * 05/19/2025 4.0.0-dev `main`: Qwen 2.5 Omni model support. 
 * 05/05/2025 4.0.0-dev `main`: Python 3.13t free-threading support added with near N x GPU linear scaling for quantization of MoE models and also linear N x Cpu Core scaling of packing stage. 
 * 04/29/2025 3.1.0-dev (Now 4.) `main`: Xiaomi Mimo model support. Qwen 3 and 3 MoE model support. New arg for `quantize(..., calibration_dataset_min_length=10)` to filter out bad calibration data that exists in public dataset (wikitext). 
-* 04/13/2025 [3.0.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v3.0.0): 🎉 New ground-breaking `GPTQ v2` quantization option for improved model quantization accuracy validated by `GSM8K_PLATINUM` [benchmarks](https://github.com/ModelCloud/GPTQModel#quantization-using-gptq-v2) vs original `gptq`. New `Phi4-MultiModal` model support . New Nvidia Nemotron-Ultra model support. New `Dream` model support. New experimental `multi-gpu` quantization support. Reduced vram usage. Faster quantization.
+* 04/13/2025 [3.0.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v3.0.0): 🎉 New experimental `GPTQ v2` quantization option for improved model quantization accuracy validated by `GSM8K_PLATINUM` [benchmarks](https://github.com/ModelCloud/GPTQModel#quantization-using-gptq-v2) vs original `gptq`. New `Phi4-MultiModal` model support . New Nvidia Nemotron-Ultra model support. New `Dream` model support. New experimental `multi-gpu` quantization support. Reduced vram usage. Faster quantization.
 * 04/2/2025 [2.2.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v2.2.0): New `Qwen 2.5 VL` model support. New `samples` log column during quantization to track module activation in MoE models. `Loss` log column now color-coded to highlight modules that are friendly/resistant to quantization. Progress (per-step) stats during quantization now streamed to log file. Auto `bfloat16`  dtype loading for models based on model config. Fix kernel compile for Pytorch/ROCm. Slightly faster quantization and auto-resolve some low-level oom issues for smaller vram gpus. 
+
+
+
+<details>
+
+<summary>Archived News</summary>
 * 03/12/2025 [2.1.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v2.1.0): ✨ New `QQQ` quantization method and inference support!
 New Google `Gemma 3` zero-day model support.
 New Alibaba `Ovis 2` VL model support. 
@@ -34,6 +44,7 @@ Peft Lora training with GPTQModel is now 30%+ faster on all gpu and IPEX devices
 Auto detect MoE modules not activated during quantization due to insufficient calibration data. 
 `ROCm` `setup.py` compat fixes. `Optimum` and `Peft` compat fixes.
 Fixed `Peft` `bfloat16` training. 
+
 * 03/03/2025 [2.0.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v2.0.0): 🎉 `GPTQ` quantization internals are now broken into multiple stages (processes) for feature expansion. 
 Synced `Marlin` kernel inference quality fix from upstream. Added `MARLIN_FP16`, lower-quality but faster backend. 
 `ModelScope` support added. Logging and cli progress bar output has been revamped with sticky bottom progress.
@@ -41,10 +52,6 @@ Fixed `generation_config.json` save and load. Fixed Transformers v4.49.0 compat.
 Fixed Qwen 2.5 MoE regressions. 
 Added CI tests to track regression in kernel inference quality and sweep all bits/group_sizes. Delegate loggin/progressbar to [LogBar](https://github.com/modelcloud/logbar) pkg.
 Fix ROCm version auto detection in `setup` install.
-
-<details>
-
-<summary>Archived News</summary>
 
 * 02/12/2025 [1.9.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.9.0): ⚡ Offload `tokenizer` fixes to [Toke(n)icer](https://github.com/modelcloud/tokenicer) pkg. Optimized `lm_head` quant time and vram usage.
   Optimized `DeepSeek v3/R1` model quant vram usage. Fixed `Optimum` compat regresion in `v1.8.1`. 3x speed-up for `Torch` kernel when using Pytorch >= 2.5.0 with `model.optimize()`. New `calibration_dataset_concat_size` option to enable calibration data `concat` mode to mimic original GPTQ data packing strategy which may improve quant speed and accuracy for datasets like `wikitext2`. 
@@ -135,11 +142,7 @@ Native support support some of the most popular multi-modal models:
 | Ovis 1.6 + 2      | ✅ | 
 | Phi-4 MultiModal  | ✅ | 
 
-## GPTQ v2 quantization unlocks useful ultra-low bit quantization
 
-<div align=center>
-<img src=https://github.com/user-attachments/assets/8e627922-0b73-4e44-b3e2-c01def5301f9 width=350>
-</div>
 
 ## Features
 * ✨ Native integration with HF [Transformers](https://github.com/huggingface/transformers), [Optimum](https://github.com/huggingface/optimum), and [Peft (main)](https://github.com/huggingface/peft)
@@ -150,7 +153,6 @@ Native support support some of the most popular multi-modal models:
 * ✨ `Dynamic` mixed quantization control on a per-module basis. Each layer/module can have a unique quantization config or be excluded from quantization all together. 
 * 🚀 [Intel/IPEX](https://github.com/intel/intel-extension-for-pytorch) hardware accelerated quantization/inference for CPU [`avx`, `amx`, `xmx`] and Intel GPU [`Arc` + `Datacenter Max`]. 
 * 🚀 [Microsoft/BITBLAS](https://github.com/microsoft/BitBLAS) format + dynamically compiled inference.
-* ✨ [Intel/AutoRound](https://github.com/intel/auto-round) alternative gptq-inference compatible quantization method.
 * ✨ Asymmetric `Sym=False` support. Model weights sharding support with optional hash check of model weights on load.
 * ✨ `lm_head` module quant inference support for further VRAM reduction.
 * 🚀 45% faster `packing` stage in quantization (Llama 3.1 8B). 50% faster PPL calculations (OPT).
@@ -161,20 +163,26 @@ Native support support some of the most popular multi-modal models:
 
 <img src=https://github.com/user-attachments/assets/c1b89394-f8f6-44e5-9949-bef15a124723 width="51%"> <img src=https://github.com/user-attachments/assets/23901236-10c5-4435-ac2f-06cf2e097f1e width="47%">
 
+## Experimental GPTQ v2 quantization: Users have reported this mode of quantization may or may not match original GPTQ v1 implementation in terms of quality recovery. 
+
+<div align=center>
+<img src=https://github.com/user-attachments/assets/8e627922-0b73-4e44-b3e2-c01def5301f9 width=300>
+</div>
+
 ## Model Support  
 | Model             |   |             |   |                |   |               |   |            |   |
 |-------------------|---|-------------|---|----------------|---|---------------|---|------------|---|
-| Baichuan          | ✅ | EXAONE 3.0  | ✅ | InternLM 1/2.5 | ✅ | OPT           | ✅ | StarCoder2 | ✅ |
-| Bloom             | ✅ | Falcon (H1) | ✅ | Llama 1-3.3    | ✅ | OLMo2         | ✅ | TeleChat2  | ✅ |
-| ChatGLM           | ✅ | Gemma 1/2/3 | ✅ | Llama 3.2 VL   | ✅ | Ovis 1.6/2    | ✅ | Yi         | ✅ |
-| CodeGen           | ✅ | GPTBigCod   | ✅ | LongLLaMA      | ✅ | Phi 1-4       | ✅ | XVERSE     | ✅ |
-| Cohere 1-2        | ✅ | GPTNeoX     | ✅ | MiniCPM3       | ✅ | PanGu-α       | ✅ |            |   |
-| DBRX Converted    | ✅ | GPT-2       | ✅ | Mistral        | ✅ | Qwen 1/2/3    | ✅ |            |   |
-| Deci              | ✅ | GPT-J       | ✅ | Mixtral        | ✅ | Qwen 2/3 MoE  | ✅ |            |   |
-| DeepSeek-V2/V3/R1 | ✅ | Granite     | ✅ | MobileLLM      | ✅ | Qwen 2/2.5 VL | ✅ |            |   |
-| DeepSeek-V2-Lite  | ✅ | GRIN-MoE    | ✅ | MOSS           | ✅ | Qwen 2.5 Omni | ✅ |            |   |
-| Dream             | ✅ | Hymba       | ✅ | MPT            | ✅ | RefinedWeb    | ✅ |            |   |
-| ERNIE 4.5         | ✅ | Instella    | ✅ | Nemotron Ultra | ✅ | StableLM      | ✅ |            |   |
+| Baichuan | ✅ | EXAONE 3.0 | ✅ | InternLM 1/2.5 | ✅ | OPT | ✅ | StableLM | ✅ |
+| Bloom | ✅ | Falcon (H1) | ✅ | Llama 1-3.3 | ✅ | OLMo2 | ✅ | StarCoder2 | ✅ |
+| ChatGLM | ✅ | Gemma 1/2/3 | ✅ | Llama 3.2 VL | ✅ | Ovis 1.6/2 | ✅ | TeleChat2 | ✅ |
+| CodeGen | ✅ | GPTBigCod | ✅ | LongLLaMA | ✅ | Phi 1-4 | ✅ | Yi | ✅ |
+| Cohere 1-2 | ✅ | GPTQ-Neo/GPT-NeoX | ✅ | MiniCPM3 | ✅ | PanGu-α | ✅ | XVERSE | ✅ |
+| DBRX Converted | ✅ | GPT-2 | ✅ | Mistral | ✅ | Qwen 1/2/3 | ✅ |  |  |
+| Deci | ✅ | GPT-J | ✅ | Mixtral | ✅ | Qwen 2/3 MoE | ✅ |  |  |
+| DeepSeek-V2/V3/R1 | ✅ | Granite | ✅ | MobileLLM | ✅ | Qwen 2/2.5 VL | ✅ |  |  |
+| DeepSeek-V2-Lite | ✅ | GRIN-MoE | ✅ | MOSS | ✅ | Qwen 2.5 Omni | ✅ |  |  |
+| Dream | ✅ | Hymba | ✅ | MPT | ✅ | RefinedWeb | ✅ |  |  |
+| ERNIE 4.5 | ✅ | Instella | ✅ | Nemotron Ultra | ✅ | Seed-OSS | ✅ |  |  |
 
 ## Platform and HW Support 
 
@@ -397,7 +405,7 @@ dynamic = {
 * Pass `auto_gc = False` to `quantize()` api to speed up quantization if gpu has plenty of vram and does not need to call slow gc.
 * Pass `buffered_fwd = True` to `quantize()` api to potentially speed up quantization if gpu has plenty of vram and can hold all fwd inputs in vram.
 
-#### Group Aware Reordering (GAR)
+### Group Aware Reordering (GAR)
 
 Group Aware Reordering (GAR) is an enhanced activation reordering scheme designed to significantly improve the accuracy of quantized models without incurring additional inference overhead. Unlike traditional activation reordering, GAR restricts permutations to within individual groups or rearrangements of entire groups. This ensures each group's associated scales and zero-points remain efficiently accessible during inference, thereby avoiding any inference-time overhead.
 
@@ -444,20 +452,20 @@ This feature is based on the method introduced in:
   
 }
 
-# GPTQ v2
-@article{li2025gptqv2,
-  title={GPTQv2: Efficient Finetuning-Free Quantization for Asymmetric Calibration}, 
-  author={Yuhang Li and Ruokai Yin and Donghyun Lee and Shiting Xiao and Priyadarshini Panda},
-  journal={arXiv preprint arXiv:2504.02692},
-  year={2025}
-}
-
 # EoRA
 @article{liu2024eora,
   title={EoRA: Training-free Compensation for Compressed LLM with Eigenspace Low-Rank Approximation},
   author={Liu, Shih-Yang and Yang, Huck and Wang, Chien-Yi and Fung, Nai Chit and Yin, Hongxu and Sakr, Charbel and Muralidharan, Saurav and Cheng, Kwang-Ting and Kautz, Jan and Wang, Yu-Chiang Frank and others},
   journal={arXiv preprint arXiv:2410.21271},
   year={2024}
+}
+
+# Group Aware Reordering (GAR)
+@article{gar,
+  title={Dual Precision Quantization for Efficient and Accurate Deep Neural Networks Inference, CVPRW 2025.},
+  author={T. Gafni, A. Karnieli, Y. Hanani},
+  journal={arXiv preprint arXiv:2505.14638},
+  year={2025}
 }
 
 # GPTQ Marlin Kernel
@@ -474,5 +482,13 @@ This feature is based on the method introduced in:
       author={Ying Zhang and Peng Zhang and Mincong Huang and Jingyang Xiang and Yujie Wang and Chao Wang and Yineng Zhang and Lei Yu and Chuan Liu and Wei Lin},
       journal={arXiv preprint arXiv:2406.09904},
       year={2024}
+}
+
+# GPTQ v2
+@article{li2025gptqv2,
+  title={GPTQv2: Efficient Finetuning-Free Quantization for Asymmetric Calibration}, 
+  author={Yuhang Li and Ruokai Yin and Donghyun Lee and Shiting Xiao and Priyadarshini Panda},
+  journal={arXiv preprint arXiv:2504.02692},
+  year={2025}
 }
 ```
