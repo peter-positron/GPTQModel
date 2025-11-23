@@ -308,6 +308,14 @@ class BaseQModel(nn.Module):
 
         self._auto_configure_lookahead()
 
+    def _apply_model_converters(self, model):
+        from ..nn_modules.converter import MODULE_CONVERTER_MAP
+        model_type = model.config.model_type
+        if model_type in MODULE_CONVERTER_MAP:
+            converter = MODULE_CONVERTER_MAP[model_type]
+            model = converter(model, model.config)
+        return model
+
     @classmethod
     def extract_layers_node(cls):
         """

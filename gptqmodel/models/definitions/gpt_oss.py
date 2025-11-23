@@ -43,6 +43,11 @@ class GptOssExpertsNew(nn.Module):
                 d_w_src  = ori_experts.down_proj[i].detach().t().contiguous()
                 d_b_src  = ori_experts.down_proj_bias[i].detach()
 
+                if gu_w_src.device.type == "meta":
+                    self.gate_up[i].to("meta")
+                    self.down[i].to("meta")
+                    continue
+
                 with torch.inference_mode():
                     tgt_gu_w.copy_(gu_w_src)
                     tgt_gu_b.copy_(gu_b_src)
@@ -113,9 +118,12 @@ class GptOssTopKRouterNew(nn.Module):
         self.bias = nn.Parameter(torch.empty(self.num_experts))
 
         if ori_router is not None:
-            with torch.inference_mode():
-                self.weight.copy_(ori_router.weight.detach())
-                self.bias.copy_(ori_router.bias.detach())
+            if ori_router.weight.device.type == "meta":
+                self.to("meta")
+            else:
+                with torch.inference_mode():
+                    self.weight.copy_(ori_router.weight.detach())
+                    self.bias.copy_(ori_router.bias.detach())
 
     def forward(self, hidden_states):
         hidden_states = hidden_states.reshape(-1, self.hidden_dim)
@@ -126,6 +134,8 @@ class GptOssTopKRouterNew(nn.Module):
         return router_scores, router_indices
 
 class GPTOSSGPTQ(BaseQModel):
+    support_offload_to_disk = True
+
     dynamic_expert_index = "num_local_experts"
 
     pre_lm_head_norm_module = "model.norm"

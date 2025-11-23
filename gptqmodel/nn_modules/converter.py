@@ -10,6 +10,7 @@ def convert_gpt_oss_expert_converter(module, config):
     from transformers.integrations.hub_kernels import use_kernel_forward_from_hub
 
     from ..models.definitions.gpt_oss import GptOssExpertsNew
+    from ..utils.model import recurse_setattr
 
     @use_kernel_forward_from_hub("MegaBlocksMoeMLP")
     class GptOssMLPNew(nn.Module):
@@ -28,7 +29,7 @@ def convert_gpt_oss_expert_converter(module, config):
     for name, sub_module in module.named_modules():
         if isinstance(sub_module, gpt_oss_modeling.GptOssMLP):
             new_module = GptOssMLPNew(config=config, ori_mlp=sub_module)
-            setattr(module, name, new_module)
+            recurse_setattr(module, name, new_module)
 
     return module
 
@@ -97,7 +98,7 @@ def convert_llama4_expert_converter(module, config):
     for name, sub_module in module.named_modules():
         if isinstance(sub_module, Llama4TextMoe):
             new_module = SequentialLlama4TextMoe(config=config.get_text_config(), original=sub_module)
-            setattr(module, name, new_module)
+            recurse_setattr(module, name, new_module)
 
     return module
 

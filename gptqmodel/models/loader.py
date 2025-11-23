@@ -269,6 +269,12 @@ def ModelLoader(cls):
             model_local_path=model_local_path,
         )
 
+        # apply model converters (e.g. GPT-OSS MoE)
+        # This must run before any quantization/looper logic to ensure shell/turtle synchronization
+        instance.model = instance._apply_model_converters(instance.model)
+        if instance.turtle_model:
+            instance.turtle_model = instance._apply_model_converters(instance.turtle_model)
+
         timer = getattr(instance, "quant_region_timer", None)
         if timer is not None:
             source_label = getattr(instance, "model_local_path", None) or str(pretrained_model_id_or_path)
