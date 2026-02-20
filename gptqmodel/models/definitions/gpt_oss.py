@@ -142,6 +142,11 @@ class GptOssTopKRouterNew(nn.Module):
         return router_scores, router_indices
 
 class GPTOSSGPTQ(BaseQModel):
+    # Disable shell/turtle disk offload — the default materialization
+    # path does not handle GPT-OSS expert weight splitting correctly,
+    # causing empty Hessians on attention modules during calibration.
+    support_offload_to_disk = False
+
     dynamic_expert_index = 'num_local_experts'
 
     expert_restack_specs = [

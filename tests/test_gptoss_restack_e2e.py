@@ -67,8 +67,28 @@ def main() -> int:
 
     print("Preparing calibration data...")
     calibration = [
-        "The quick brown fox jumps over the lazy dog.",
-        "In a hole in the ground there lived a hobbit.",
+        (
+            "The quick brown fox jumps over the lazy dog. "
+            "This is a longer sentence to ensure the tokenized "
+            "sequence exceeds the minimum length threshold for "
+            "calibration data. We need enough tokens to build "
+            "a meaningful Hessian for each quantized layer. "
+            "The model has 24 decoder layers with 32 experts "
+            "each, attention projections, and layer norms. "
+            "Quantization requires representative activations "
+            "from the calibration forward pass through every "
+            "module in the computation graph."
+        ),
+        (
+            "In a hole in the ground there lived a hobbit. "
+            "Not a nasty, dirty, wet hole, filled with the "
+            "ends of worms and an oozy smell, nor yet a dry, "
+            "bare, sandy hole with nothing in it to sit down "
+            "on or to eat: it was a hobbit-hole, and that "
+            "means comfort. It had a perfectly round door "
+            "like a porthole, painted green, with a shiny "
+            "yellow brass knob in the exact middle."
+        ),
     ]
 
     print("Quantizing...")
