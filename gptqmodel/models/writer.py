@@ -307,10 +307,15 @@ def ModelWriter(cls):
         state_dict = get_state_dict_for_save(self.model, offload_root=offload_root)
 
         if self.expert_restack_specs is not None:
-            from .expert_restack import restack_moe_experts
-            state_dict = restack_moe_experts(
-                state_dict, self.expert_restack_specs, self.model.config,
-            )
+            import os
+            save_format = os.environ.get("GPTQMODEL_MOE_SAVE_FORMAT", "stacked")
+            if save_format == "per_expert":
+                log.info("GPTQMODEL_MOE_SAVE_FORMAT=per_expert: skipping expert restack")
+            else:
+                from .expert_restack import restack_moe_experts
+                state_dict = restack_moe_experts(
+                    state_dict, self.expert_restack_specs, self.model.config,
+                )
 
         model_base_name = "model"
         model_save_name = model_base_name + ".safetensors"
