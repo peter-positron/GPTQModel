@@ -33,29 +33,40 @@ class GptOssExpertsNew(nn.Module):
 
         if ori_experts is not None:
             self.quantizing = True
+            # Detect if source is already a GptOssExpertsNew (has
+            # gate_up ModuleList) vs original GptOssExperts (has
+            # gate_up_proj stacked Parameter).
+            is_converted = (
+                hasattr(ori_experts, 'gate_up')
+                and isinstance(ori_experts.gate_up, nn.ModuleList)
+            )
+
             for i in range(self.num_experts):
-                tgt_gu_w = self.gate_up[i].weight  # [2E, H]
-                tgt_gu_b = self.gate_up[i].bias  # [2E]
-                tgt_d_w = self.down[i].weight  # [H, E]
-                tgt_d_b = self.down[i].bias  # [H]
+                if is_converted:
+                    gu_w_src = ori_experts.gate_up[i].weight.detach()
+                    gu_b_src = ori_experts.gate_up[i].bias.detach()
+                    d_w_src = ori_experts.down[i].weight.detach()
+                    d_b_src = ori_experts.down[i].bias.detach()
+                else:
+                    gu_w_src = ori_experts.gate_up_proj[i].detach().t().contiguous()
+                    gu_b_src = ori_experts.gate_up_proj_bias[i].detach()
+                    d_w_src = ori_experts.down_proj[i].detach().t().contiguous()
+                    d_b_src = ori_experts.down_proj_bias[i].detach()
 
-                gu_w_src = ori_experts.gate_up_proj[i].detach().t().contiguous()
-                gu_b_src = ori_experts.gate_up_proj_bias[i].detach()
-                d_w_src = ori_experts.down_proj[i].detach().t().contiguous()
-                d_b_src = ori_experts.down_proj_bias[i].detach()
-
-                # Handle meta device tensors from shell model - preserve meta state
-                # so alias_all_from_turtle_if_meta can sync from turtle later
+                # Handle meta device tensors from shell model
                 if gu_w_src.device.type == 'meta':
                     self.gate_up[i].to('meta')
                     self.down[i].to('meta')
                     continue
 
                 with torch.inference_mode():
-                    tgt_gu_w.copy_(gu_w_src)
-                    tgt_gu_b.copy_(gu_b_src)
-                    tgt_d_w.copy_(d_w_src)
-                    tgt_d_b.copy_(d_b_src)
+                    self.gate_up[i].weight.copy_(gu_w_src)
+                    self.gate_up[i].bias.copy_(gu_b_src)
+                    self.down[i].weight.copy_(d_w_src)
+                    self.down[i].bias.copy_(d_b_src)
+
+        # Prevent transformers _init_weights from clobbering weights
+        self._is_hf_initialized = True
 
     def forward(self, hidden_states: torch.Tensor, router_indices=None, routing_weights=None) -> torch.Tensor:
         if self.quantizing:
@@ -129,6 +140,9 @@ class GptOssTopKRouterNew(nn.Module):
                 with torch.inference_mode():
                     self.weight.copy_(ori_router.weight.detach())
                     self.bias.copy_(ori_router.bias.detach())
+
+        # Prevent transformers _init_weights from clobbering weights
+        self._is_hf_initialized = True
 
     def forward(self, hidden_states):
         hidden_states = hidden_states.reshape(-1, self.hidden_dim)

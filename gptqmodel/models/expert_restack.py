@@ -7,12 +7,14 @@ from __future__ import annotations
 import re
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Dict, FrozenSet, List, Set, Tuple
+from typing import TYPE_CHECKING, Dict, FrozenSet, List, Set, Tuple
 
 import torch
-from transformers import PretrainedConfig
 
 from ..utils.model import OffloadTensorRef, TensorSource
+
+if TYPE_CHECKING:
+    from transformers import PretrainedConfig
 
 
 @dataclass(frozen=True)

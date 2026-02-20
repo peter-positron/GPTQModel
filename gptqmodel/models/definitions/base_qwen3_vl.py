@@ -7,7 +7,10 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
 from PIL import Image
-from qwen_vl_utils.vision_process import fetch_video
+try:
+    from qwen_vl_utils.vision_process import fetch_video
+except ModuleNotFoundError:
+    fetch_video = None
 from transformers import AutoModelForImageTextToText, AutoProcessor, ProcessorMixin
 
 from ...utils.calibration import batched
