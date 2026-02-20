@@ -87,3 +87,98 @@ class TestGarRemainder:
         perm = _build_gar_perm(columns=17, group_size=5)
         assert len(perm) == 17
         assert set(perm.tolist()) == set(range(17))
+
+
+class TestGarPermLengthInvariant:
+    """Explicit invariant: len(final_perm) == n_cols for all cases.
+
+    This makes the original bug (silent column truncation) impossible
+    to reintroduce without a test failure.
+    """
+
+    CASES = [
+        (2560, 128, "divisible"),
+        (2880, 128, "gpt-oss remainder=64"),
+        (17, 5, "small remainder=2"),
+        (129, 128, "remainder=1"),
+        (127, 128, "cols < group_size"),
+        (256, 256, "cols == group_size"),
+        (1, 1, "trivial"),
+    ]
+
+    def test_perm_length_equals_columns(self) -> None:
+        for cols, gs, label in self.CASES:
+            perm = _build_gar_perm(columns=cols, group_size=gs)
+            assert len(perm) == cols, (
+                f"{label}: len(perm)={len(perm)} != {cols}"
+            )
+
+    def test_perm_is_bijection(self) -> None:
+        for cols, gs, label in self.CASES:
+            perm = _build_gar_perm(columns=cols, group_size=gs)
+            assert len(set(perm.tolist())) == cols, (
+                f"{label}: perm has duplicates"
+            )
+            assert perm.min().item() == 0, (
+                f"{label}: perm min != 0"
+            )
+            assert perm.max().item() == cols - 1, (
+                f"{label}: perm max != {cols - 1}"
+            )
+
+
+class TestGarSmokeQuantPath:
+    """Minimal CPU smoke test exercising the GAR reorder path from
+    gptq.py quantize() with a fake linear (in_features=2880,
+    group_size=128).
+
+    Does NOT run full GPTQ quantization — only the permutation and
+    Hessian reorder steps that caused the original crash.
+    """
+
+    def test_reorder_path_preserves_shapes(self) -> None:
+        """Simulate the GAR reorder path: build H, permute W and H,
+        verify shapes and invertibility.
+        """
+        rows, cols, gs = 64, 2880, 128
+
+        W = torch.randn(rows, cols)
+        # Simulate Hessian diagonal (from add_batch accumulation)
+        diag_h = torch.randn(cols).abs() + 1e-6
+        H = torch.diag(diag_h)
+
+        # Build GAR permutation (same path as gptq.py)
+        perm = _build_gar_perm(columns=cols, group_size=gs)
+
+        # Apply permutation (mirrors gptq.py lines 993-994)
+        W_perm = W[:, perm]
+        H_perm = H[perm][:, perm]
+
+        assert W_perm.shape == (rows, cols)
+        assert H_perm.shape == (cols, cols)
+
+        # Inverse recovers original
+        inv_perm = torch.argsort(perm)
+        W_restored = W_perm[:, inv_perm]
+        assert torch.allclose(W, W_restored)
+
+    def test_block_loop_indexing(self) -> None:
+        """Verify that the GPTQ block loop can index into permuted W
+        without IndexError (the original crash).
+        """
+        cols, gs, blocksize = 2880, 128, 128
+
+        W = torch.randn(64, cols)
+        perm = _build_gar_perm(columns=cols, group_size=gs)
+        W_perm = W[:, perm]
+
+        # Simulate block loop from gptq.py (lines 1006-1008)
+        blocks_visited = 0
+        for i1 in range(0, cols, blocksize):
+            i2 = min(i1 + blocksize, cols)
+            block = W_perm[:, i1:i2]
+            assert block.shape[1] == i2 - i1
+            blocks_visited += 1
+
+        expected_blocks = (cols + blocksize - 1) // blocksize
+        assert blocks_visited == expected_blocks
