@@ -6,6 +6,7 @@
 from transformers import AutoModelForImageTextToText
 
 from ..base import BaseQModel
+from ..expert_restack import ExpertRestackSpec
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
 
@@ -21,6 +22,27 @@ class Llama4QModel(BaseQModel):
 
     # MoE lifecycle hooks for gate_proj/up_proj/down_proj pattern
     moe_lifecycle_hooks = GateUpDownMoELifecycleHooks()
+
+    expert_restack_specs = [
+        ExpertRestackSpec(
+            unstacked_template="gate_up.{expert}",
+            stacked_name="gate_up_proj",
+            transpose_suffixes=frozenset(),
+            stacked_suffix_overrides={
+                "weight": "",
+                "bias": "_bias",
+            },
+        ),
+        ExpertRestackSpec(
+            unstacked_template="down.{expert}",
+            stacked_name="down_proj",
+            transpose_suffixes=frozenset(),
+            stacked_suffix_overrides={
+                "weight": "",
+                "bias": "_bias",
+            },
+        ),
+    ]
 
     module_tree = [
         "language_model",

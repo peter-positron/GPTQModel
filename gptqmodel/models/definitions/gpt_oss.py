@@ -7,6 +7,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from ..base import BaseQModel
+from ..expert_restack import ExpertRestackSpec
 
 
 class GptOssExpertsNew(nn.Module):
@@ -33,15 +34,22 @@ class GptOssExpertsNew(nn.Module):
         if ori_experts is not None:
             self.quantizing = True
             for i in range(self.num_experts):
-                tgt_gu_w = self.gate_up[i].weight   # [2E, H]
-                tgt_gu_b = self.gate_up[i].bias     # [2E]
-                tgt_d_w  = self.down[i].weight      # [H, E]
-                tgt_d_b  = self.down[i].bias        # [H]
+                tgt_gu_w = self.gate_up[i].weight  # [2E, H]
+                tgt_gu_b = self.gate_up[i].bias  # [2E]
+                tgt_d_w = self.down[i].weight  # [H, E]
+                tgt_d_b = self.down[i].bias  # [H]
 
                 gu_w_src = ori_experts.gate_up_proj[i].detach().t().contiguous()
                 gu_b_src = ori_experts.gate_up_proj_bias[i].detach()
-                d_w_src  = ori_experts.down_proj[i].detach().t().contiguous()
-                d_b_src  = ori_experts.down_proj_bias[i].detach()
+                d_w_src = ori_experts.down_proj[i].detach().t().contiguous()
+                d_b_src = ori_experts.down_proj_bias[i].detach()
+
+                # Handle meta device tensors from shell model - preserve meta state
+                # so alias_all_from_turtle_if_meta can sync from turtle later
+                if gu_w_src.device.type == 'meta':
+                    self.gate_up[i].to('meta')
+                    self.down[i].to('meta')
+                    continue
 
                 with torch.inference_mode():
                     tgt_gu_w.copy_(gu_w_src)
@@ -113,9 +121,14 @@ class GptOssTopKRouterNew(nn.Module):
         self.bias = nn.Parameter(torch.empty(self.num_experts))
 
         if ori_router is not None:
-            with torch.inference_mode():
-                self.weight.copy_(ori_router.weight.detach())
-                self.bias.copy_(ori_router.bias.detach())
+            # Handle meta device tensors from shell model - preserve meta state
+            # so alias_all_from_turtle_if_meta can sync from turtle later
+            if ori_router.weight.device.type == 'meta':
+                self.to('meta')
+            else:
+                with torch.inference_mode():
+                    self.weight.copy_(ori_router.weight.detach())
+                    self.bias.copy_(ori_router.bias.detach())
 
     def forward(self, hidden_states):
         hidden_states = hidden_states.reshape(-1, self.hidden_dim)
@@ -126,30 +139,145 @@ class GptOssTopKRouterNew(nn.Module):
         return router_scores, router_indices
 
 class GPTOSSGPTQ(BaseQModel):
-    dynamic_expert_index = "num_local_experts"
+    # Enable shell/turtle architecture to ensure proper weight syncing during quantization.
+    # Without this, weights are loaded directly to CPU and non-quantized tensors
+    # (embed_tokens, lm_head, norm) may be corrupted with initialization values.
+    support_offload_to_disk = True
 
-    pre_lm_head_norm_module = "model.norm"
+    dynamic_expert_index = 'num_local_experts'
+
+    expert_restack_specs = [
+        ExpertRestackSpec(
+            unstacked_template="gate_up.{expert}",
+            stacked_name="gate_up_proj",
+            stacked_suffix_overrides={
+                "weight": "",
+                "bias": "_bias",
+            },
+        ),
+        ExpertRestackSpec(
+            unstacked_template="down.{expert}",
+            stacked_name="down_proj",
+            stacked_suffix_overrides={
+                "weight": "",
+                "bias": "_bias",
+            },
+        ),
+    ]
+
+    pre_lm_head_norm_module = 'model.norm'
 
     module_tree = [
-        "model",
-        "layers",
-        "#",
+        'model',
+        'layers',
+        '#',
         {
-            "input_layernorm": ("input_layernorm:!",),
-            "self_attn": ("q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1"),
-            "post_attention_layernorm": ("post_attention_layernorm:!",),
-            "mlp": {
-                "experts": {
-                    "gate_up": {"#": ("#")},
-                    "down": {"#": ("#")},
+            'input_layernorm': ('input_layernorm:!',),
+            'self_attn': ('q_proj:0', 'k_proj:0', 'v_proj:0', 'o_proj:1'),
+            'post_attention_layernorm': ('post_attention_layernorm:!',),
+            'mlp': {
+                'experts': {
+                    'gate_up': {'#': ('#')},
+                    'down': {'#': ('#')},
                 }
-            }
-        }
+            },
+        },
     ]
 
     def before_model_load(self, load_quantized_model=False):
-        if load_quantized_model:
-            import transformers.models.gpt_oss.modeling_gpt_oss as gpt_oss_modeling
+        # Always apply class replacements for consistent model structure between
+        # quantization and loading phases. The original transformers classes have
+        # initialization quirks that can cause weight corruption when loading
+        # models with trust_remote_code=True.
+        import transformers.models.gpt_oss.modeling_gpt_oss as gpt_oss_modeling
 
-            gpt_oss_modeling.GptOssExperts = GptOssExpertsNew
-            gpt_oss_modeling.GptOssTopKRouter = GptOssTopKRouterNew
+        gpt_oss_modeling.GptOssExperts = GptOssExpertsNew
+        gpt_oss_modeling.GptOssTopKRouter = GptOssTopKRouterNew
+
+    def shell_module_materialize(
+        self,
+        target_submodule: torch.nn.Module,
+        device: torch.device,
+        non_blocking: bool = False,
+    ) -> torch.nn.Module:
+        # Custom materialization for GPT-OSS to handle expert weight splitting
+        # from stacked tensor format (turtle) to ModuleList format (shell)
+        with self._turtle_lock:
+            turtle_model = self.turtle_model
+
+            if turtle_model is None:
+                # No turtle model, use default behavior
+                return super().shell_module_materialize(target_submodule, device, non_blocking)
+
+            # Check if this is an expert ModuleList that needs special handling
+            if isinstance(target_submodule, nn.ModuleList):
+                # Try to find the parent path
+                target_path = None
+                for name, mod in self.model.named_modules():
+                    if mod is target_submodule:
+                        target_path = name
+                        break
+
+                # Check if this is a GPT-OSS expert ModuleList (gate_up or down)
+                if target_path and '.experts.' in target_path and (target_path.endswith('.gate_up') or target_path.endswith('.down')):
+                    # Find the corresponding original experts module in turtle
+                    parent_path = target_path.rsplit('.', 1)[0]  # e.g., "model.layers.0.mlp.experts"
+                    turtle_experts = None
+                    for name, mod in turtle_model.named_modules():
+                        if name == parent_path:
+                            turtle_experts = mod
+                            break
+
+                    if turtle_experts is not None:
+                        is_gate_up = target_path.endswith('.gate_up')
+
+                        # Check if turtle has ModuleList format (from paibaker unpacked weights)
+                        # or stacked format (original HF checkpoint)
+                        turtle_source = getattr(turtle_experts, 'gate_up' if is_gate_up else 'down', None)
+                        has_modulelist = isinstance(turtle_source, nn.ModuleList)
+
+                        # Materialize each expert
+                        for i, expert_linear in enumerate(target_submodule):
+                            if has_modulelist:
+                                # ModuleList format: copy directly from turtle's individual experts
+                                w_src = turtle_source[i].weight.detach()
+                                b_src = turtle_source[i].bias.detach()
+                            else:
+                                # Stacked format: extract from stacked tensors with transpose
+                                if is_gate_up:
+                                    # gate_up_proj is [num_experts, hidden, 2*intermediate]
+                                    w_src = turtle_experts.gate_up_proj[i].detach().t().contiguous()
+                                    b_src = turtle_experts.gate_up_proj_bias[i].detach()
+                                else:
+                                    # down_proj is [num_experts, intermediate, hidden]
+                                    w_src = turtle_experts.down_proj[i].detach().t().contiguous()
+                                    b_src = turtle_experts.down_proj_bias[i].detach()
+
+                            # Allocate target tensor on device if needed
+                            if expert_linear.weight.device.type == 'meta':
+                                expert_linear.weight = nn.Parameter(
+                                    torch.empty_like(expert_linear.weight, device=device),
+                                    requires_grad=False
+                                )
+                                expert_linear.bias = nn.Parameter(
+                                    torch.empty_like(expert_linear.bias, device=device),
+                                    requires_grad=False
+                                )
+                            elif expert_linear.weight.device != device:
+                                expert_linear.weight.data = expert_linear.weight.data.to(device, copy=True)
+                                expert_linear.bias.data = expert_linear.bias.data.to(device, copy=True)
+
+                            # Copy the weights
+                            with torch.inference_mode():
+                                expert_linear.weight.detach().copy_(
+                                    w_src.to(device), non_blocking=(non_blocking and w_src.is_pinned())
+                                )
+                                expert_linear.bias.detach().copy_(
+                                    b_src.to(device), non_blocking=(non_blocking and b_src.is_pinned())
+                                )
+
+                        self._maybe_auto_reload_after_alias(target_submodule, target_submodule)
+                        return target_submodule
+
+        # Fall back to default behavior for non-expert modules
+        return super().shell_module_materialize(target_submodule, device, non_blocking)

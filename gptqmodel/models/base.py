@@ -207,6 +207,10 @@ class BaseQModel(nn.Module):
 
     support_offload_to_disk = True
 
+    # Specs for restacking per-expert ModuleList keys back into
+    # HF stacked format on save. None means no restacking needed.
+    expert_restack_specs: Optional[list] = None
+
     moe_expert_module_name_prefixes = [".expert"]
 
     ATTENTION_MASKS_DTYPE = torch.bool # default to bool
