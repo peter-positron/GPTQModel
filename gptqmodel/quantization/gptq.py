@@ -980,6 +980,16 @@ class GPTQ:
             )
             del local_values
             final_perm = compose_final_perm(local_perms, global_perm, self.qcfg.group_size)
+            # GAR permutation covers num_groups*group_size columns.
+            # When columns % group_size != 0, append the remainder
+            # indices so every column is preserved.
+            remainder_start = len(final_perm)
+            if remainder_start < self.columns:
+                remainder = torch.arange(
+                    remainder_start, self.columns,
+                    dtype=final_perm.dtype, device=final_perm.device,
+                )
+                final_perm = torch.cat([final_perm, remainder])
             W = W[:, final_perm]
             self.H = self.H[final_perm][:, final_perm]
 
@@ -1097,6 +1107,14 @@ class GPTQ:
                 # redundant quantizer reconfiguration across partial groups.
                 effective_block = self.qcfg.group_size
 
+            if W.shape[1] != self.columns or W.shape[1] == 0:
+                raise RuntimeError(
+                    f"[GPTQ invariant] {self.name=} "
+                    f"W.shape={tuple(W.shape)} self.columns={self.columns} "
+                    f"device={W.device} dtype={W.dtype} "
+                    f"nsamples={self.nsamples} use_hessian={use_hessian}"
+                )
+
             for i1 in range(0, self.columns, effective_block):
                 i2 = min(i1 + effective_block, self.columns)
                 count = i2 - i1
@@ -1195,9 +1213,17 @@ class GPTQ:
             Q = Q[:, inv_final]
             inv_global_perm = invert_perm(global_perm)
             inv_global_perm_list = inv_global_perm.tolist()
+            # Reorder the GAR-permuted groups back to original order.
+            # scale/zero may contain extra entries for a remainder
+            # group (columns % group_size != 0).  Those entries were
+            # appended after the permuted groups and must stay at the
+            # end after un-permuting.
+            num_gar_groups = len(inv_global_perm_list)
             temp_scale = [scale[i] for i in inv_global_perm_list]
+            temp_scale.extend(scale[num_gar_groups:])
             scale = temp_scale
             temp_zero = [zero[i] for i in inv_global_perm_list]
+            temp_zero.extend(zero[num_gar_groups:])
             zero = temp_zero
             del final_perm, inv_final, global_perm, inv_global_perm, inv_global_perm_list, local_perms
 

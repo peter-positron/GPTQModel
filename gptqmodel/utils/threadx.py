@@ -443,10 +443,17 @@ class _DeviceWorker:
         except Exception:
             pass
         try:
+            with open("/tmp/gptqmodel_worker_exc.txt", "a") as _f:
+                _f.write(f"--- worker={getattr(self, 'name', '?')} ---\n")
+                traceback.print_exception(type(exc), exc, exc.__traceback__, file=_f)
+        except Exception:
+            pass
+        if os.environ.get("GPTQMODEL_ABORT_ON_WORKER_EXC", "1") == "0":
+            return
+        try:
             _restore_terminal_settings_on_exit()
             os._exit(1)
         except Exception:
-            # Last resort if os._exit is unavailable for some reason.
             os.system("kill -9 %d" % os.getpid())
 
 
