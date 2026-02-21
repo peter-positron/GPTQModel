@@ -534,20 +534,32 @@ def _read_quant_log(model_dir: Path) -> dict | None:
     }
 
 
-def run_quality_gate(model_dir: Path, device: str, bf16: bool = False) -> dict[str, Any]:
-    """Run full quality gate on one model directory. Returns summary dict."""
+def run_quality_gate(
+    model_dir: Path,
+    device: str,
+    bf16: bool = False,
+    perplexity_only: bool = False,
+) -> dict[str, Any]:
+    """Run full quality gate on one model directory. Returns summary dict.
+
+    If perplexity_only=True, skip generation checks and load existing results
+    from quality_gate_results.jsonl. Only runs perplexity + quant_log.
+    """
     # Read metadata
     meta_path = model_dir / "run_metadata.json"
     meta = json.loads(meta_path.read_text()) if meta_path.exists() else {}
     cell_name = "bf16/baseline" if bf16 else get_cell_name(meta)
     git_commit = get_git_commit()
 
+    mode_label = "perplexity-only" if perplexity_only else (
+        "bf16 (unquantized baseline)" if bf16 else "quantized"
+    )
     print(f"\n{'=' * 70}")
     print(f"QUALITY GATE: {cell_name}")
     print(f"  Model: {model_dir}")
     print(f"  Commit: {git_commit}")
     print(f"  Device: {device}")
-    print(f"  Mode: {'bf16 (unquantized baseline)' if bf16 else 'quantized'}")
+    print(f"  Mode: {mode_label}")
     print(f"{'=' * 70}\n")
 
     # Apply paibaker patches if available
@@ -586,119 +598,131 @@ def run_quality_gate(model_dir: Path, device: str, bf16: bool = False) -> dict[s
     results: list[dict[str, Any]] = []
     jsonl_path = model_dir / "quality_gate_results.jsonl"
 
-    with open(jsonl_path, "w") as jsonl_f:
-        total = sum(len(p["variants"]) for p in PROMPTS)
-        gen_idx = 0
+    if perplexity_only:
+        # Load existing generation results if available
+        if jsonl_path.exists():
+            with open(jsonl_path) as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        results.append(json.loads(line))
+            print(f"Loaded {len(results)} existing generation results from {jsonl_path.name}")
+        else:
+            print("No existing results found — perplexity-only mode, skipping generations")
+    else:
+        with open(jsonl_path, "w") as jsonl_f:
+            total = sum(len(p["variants"]) for p in PROMPTS)
+            gen_idx = 0
 
-        for prompt_def in PROMPTS:
-            pid = prompt_def["id"]
-            category = prompt_def["category"]
-            max_tokens = prompt_def["max_new_tokens"]
+            for prompt_def in PROMPTS:
+                pid = prompt_def["id"]
+                category = prompt_def["category"]
+                max_tokens = prompt_def["max_new_tokens"]
 
-            for variant_idx, variant_text in enumerate(prompt_def["variants"]):
-                gen_idx += 1
-                print(f"[{gen_idx}/{total}] {pid} v{variant_idx}: {variant_text[:60]}...")
+                for variant_idx, variant_text in enumerate(prompt_def["variants"]):
+                    gen_idx += 1
+                    print(f"[{gen_idx}/{total}] {pid} v{variant_idx}: {variant_text[:60]}...")
 
-                # Generate
-                t0 = time.monotonic()
-                # For device_map="auto" (bf16), use the model's input device
-                input_device = device if not bf16 else model.device
-                input_ids = tokenizer(
-                    variant_text, return_tensors="pt"
-                ).input_ids.to(input_device)
-                output_ids = model.generate(
-                    input_ids=input_ids,
-                    max_new_tokens=max_tokens,
-                    do_sample=False,
-                    temperature=1.0,
-                )
-                gen_time = time.monotonic() - t0
-                new_token_ids = output_ids[0][input_ids.shape[1]:].tolist()
-                generated_text = tokenizer.decode(
-                    output_ids[0][input_ids.shape[1]:],
-                    skip_special_tokens=True,
-                )
-                n_tokens = len(new_token_ids)
-
-                # Loop detection
-                loop_metrics = check_loops(new_token_ids, generated_text)
-
-                # Derail detection (open_ended and instruction only)
-                anchors = prompt_def.get("anchors", [])
-                if anchors:
-                    derail_metrics = check_derail(
-                        generated_text, new_token_ids, anchors
+                    # Generate
+                    t0 = time.monotonic()
+                    # For device_map="auto" (bf16), use the model's input device
+                    input_device = device if not bf16 else model.device
+                    input_ids = tokenizer(
+                        variant_text, return_tensors="pt"
+                    ).input_ids.to(input_device)
+                    output_ids = model.generate(
+                        input_ids=input_ids,
+                        max_new_tokens=max_tokens,
+                        do_sample=False,
+                        temperature=1.0,
                     )
-                else:
-                    derail_metrics = {
-                        "derail_flag": False,
-                        "anchor_coverage": None,
-                        "anchor_decay": None,
+                    gen_time = time.monotonic() - t0
+                    new_token_ids = output_ids[0][input_ids.shape[1]:].tolist()
+                    generated_text = tokenizer.decode(
+                        output_ids[0][input_ids.shape[1]:],
+                        skip_special_tokens=True,
+                    )
+                    n_tokens = len(new_token_ids)
+
+                    # Loop detection
+                    loop_metrics = check_loops(new_token_ids, generated_text)
+
+                    # Derail detection (open_ended and instruction only)
+                    anchors = prompt_def.get("anchors", [])
+                    if anchors:
+                        derail_metrics = check_derail(
+                            generated_text, new_token_ids, anchors
+                        )
+                    else:
+                        derail_metrics = {
+                            "derail_flag": False,
+                            "anchor_coverage": None,
+                            "anchor_decay": None,
+                        }
+
+                    # Capability check (factual and code only)
+                    # For code prompts, prepend the prompt so the function
+                    # extractor can find the full def (prompt has the signature,
+                    # generation has the body).
+                    checker = prompt_def.get("checker")
+                    if checker:
+                        check_text = (
+                            variant_text + generated_text
+                            if prompt_def["category"] == "code"
+                            else generated_text
+                        )
+                        cap_pass, cap_detail = checker(check_text)
+                        capability = {"capability_pass": cap_pass, "capability_detail": cap_detail}
+                    else:
+                        capability = {"capability_pass": None, "capability_detail": None}
+
+                    # Status line
+                    flags = []
+                    if loop_metrics["loop_flag"]:
+                        flags.append(f"LOOP({','.join(loop_metrics['detectors_triggered'])})")
+                    if derail_metrics["derail_flag"]:
+                        flags.append(f"DERAIL(cov={derail_metrics['anchor_coverage']:.2f})")
+                    if capability["capability_pass"] is False:
+                        flags.append(f"FAIL({capability['capability_detail'][:40]})")
+
+                    status = " ".join(flags) if flags else "OK"
+                    print(f"  {n_tokens} tokens, {gen_time:.1f}s — {status}")
+
+                    # Build record
+                    record = {
+                        "git_commit": git_commit,
+                        "cell": cell_name,
+                        "prompt_id": pid,
+                        "prompt_variant": variant_idx,
+                        "prompt_category": category,
+                        "prompt_text": variant_text,
+                        "decode_params": {
+                            "do_sample": False,
+                            "max_new_tokens": max_tokens,
+                        },
+                        "tokens_generated": n_tokens,
+                        "gen_time_seconds": round(gen_time, 2),
+                        "loop_flag": loop_metrics["loop_flag"],
+                        "loop_metrics": {
+                            "max_4gram_count": loop_metrics["max_4gram_count"],
+                            "repeat_fraction": loop_metrics["repeat_fraction"],
+                            "min_distinct2": loop_metrics["min_distinct2"],
+                            "max_sentence_count": loop_metrics["max_sentence_count"],
+                            "detectors_triggered": loop_metrics["detectors_triggered"],
+                        },
+                        "derail_flag": derail_metrics["derail_flag"],
+                        "derail_metrics": {
+                            "anchor_coverage": derail_metrics["anchor_coverage"],
+                            "anchor_decay": derail_metrics["anchor_decay"],
+                        },
+                        "capability_pass": capability["capability_pass"],
+                        "capability_detail": capability["capability_detail"],
+                        "raw_text": generated_text[:1000],
                     }
 
-                # Capability check (factual and code only)
-                # For code prompts, prepend the prompt so the function
-                # extractor can find the full def (prompt has the signature,
-                # generation has the body).
-                checker = prompt_def.get("checker")
-                if checker:
-                    check_text = (
-                        variant_text + generated_text
-                        if prompt_def["category"] == "code"
-                        else generated_text
-                    )
-                    cap_pass, cap_detail = checker(check_text)
-                    capability = {"capability_pass": cap_pass, "capability_detail": cap_detail}
-                else:
-                    capability = {"capability_pass": None, "capability_detail": None}
-
-                # Status line
-                flags = []
-                if loop_metrics["loop_flag"]:
-                    flags.append(f"LOOP({','.join(loop_metrics['detectors_triggered'])})")
-                if derail_metrics["derail_flag"]:
-                    flags.append(f"DERAIL(cov={derail_metrics['anchor_coverage']:.2f})")
-                if capability["capability_pass"] is False:
-                    flags.append(f"FAIL({capability['capability_detail'][:40]})")
-
-                status = " ".join(flags) if flags else "OK"
-                print(f"  {n_tokens} tokens, {gen_time:.1f}s — {status}")
-
-                # Build record
-                record = {
-                    "git_commit": git_commit,
-                    "cell": cell_name,
-                    "prompt_id": pid,
-                    "prompt_variant": variant_idx,
-                    "prompt_category": category,
-                    "prompt_text": variant_text,
-                    "decode_params": {
-                        "do_sample": False,
-                        "max_new_tokens": max_tokens,
-                    },
-                    "tokens_generated": n_tokens,
-                    "gen_time_seconds": round(gen_time, 2),
-                    "loop_flag": loop_metrics["loop_flag"],
-                    "loop_metrics": {
-                        "max_4gram_count": loop_metrics["max_4gram_count"],
-                        "repeat_fraction": loop_metrics["repeat_fraction"],
-                        "min_distinct2": loop_metrics["min_distinct2"],
-                        "max_sentence_count": loop_metrics["max_sentence_count"],
-                        "detectors_triggered": loop_metrics["detectors_triggered"],
-                    },
-                    "derail_flag": derail_metrics["derail_flag"],
-                    "derail_metrics": {
-                        "anchor_coverage": derail_metrics["anchor_coverage"],
-                        "anchor_decay": derail_metrics["anchor_decay"],
-                    },
-                    "capability_pass": capability["capability_pass"],
-                    "capability_detail": capability["capability_detail"],
-                    "raw_text": generated_text[:1000],
-                }
-
-                results.append(record)
-                jsonl_f.write(json.dumps(record) + "\n")
-                jsonl_f.flush()
+                    results.append(record)
+                    jsonl_f.write(json.dumps(record) + "\n")
+                    jsonl_f.flush()
 
     # Perplexity evaluation (wikitext-2)
     import torch
@@ -884,6 +908,10 @@ def main() -> int:
         "--bf16", action="store_true",
         help="Load as bf16 unquantized model (baseline comparison)",
     )
+    parser.add_argument(
+        "--perplexity-only", action="store_true",
+        help="Skip generation checks, load existing results, only compute perplexity",
+    )
     args = parser.parse_args()
 
     # Validate paths
@@ -894,7 +922,10 @@ def main() -> int:
 
     summaries = []
     for model_dir in args.model_dirs:
-        summary = run_quality_gate(model_dir, args.device, bf16=args.bf16)
+        summary = run_quality_gate(
+            model_dir, args.device, bf16=args.bf16,
+            perplexity_only=args.perplexity_only,
+        )
         summaries.append(summary)
 
     print_summary_table(summaries)
