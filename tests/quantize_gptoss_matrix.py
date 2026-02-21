@@ -1,14 +1,20 @@
 """Quantize GPT-OSS with configurable profile and GAR setting.
 
 Usage:
-    python tests/quantize_gptoss_matrix.py --profile good --gar on --output-dir /raid/peter/quants/gpt-oss-20b-good-gar-on
-    python tests/quantize_gptoss_matrix.py --profile best --gar off --output-dir /raid/peter/quants/gpt-oss-20b-best-gar-off
+    python tests/quantize_gptoss_matrix.py --profile good --gar on --output-dir /path/to/quants/good-gar-on
+    python tests/quantize_gptoss_matrix.py --profile best --gar off --output-dir /path/to/quants/best-gar-off \
+        --calibration /mnt/datasets/calibration/harmony-wikitext-256.json
+
+Pre-render calibration data first (uses paibaker venv for Harmony tokenizer):
+    /mnt/disk3/repos/paibaker/.venv/bin/python tests/generate_harmony_calibration.py \
+        --output /mnt/datasets/calibration/harmony-wikitext-256.json --samples 256
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -16,7 +22,10 @@ from pathlib import Path
 from safetensors import safe_open
 
 
-MODEL_PATH = "/raid/peter/openai--gpt-oss-20b-bf16"
+MODEL_PATH = os.environ.get(
+    "GPTQMODEL_SOURCE_MODEL",
+    "/mnt/datasets/source/openai--gpt-oss-20b-bf16",
+)
 
 PROFILES = {
     "best": {"bits": 4, "group_size": 64, "sym": True, "desc_act": False},
@@ -54,52 +63,46 @@ CALIBRATION_FALLBACK = [
 
 
 def load_calibration(
-    n_samples: int = 128, use_harmony: bool = True,
+    calibration_path: str | None = None,
+    n_samples: int = 128,
 ) -> list[str | dict]:
-    """Load calibration data with Harmony conversation framing.
+    """Load calibration data for GPTQModel.quantize().
 
-    Returns a list suitable for GPTQModel.quantize():
-    - With Harmony: list of token-ID dicts (pre-tokenized)
-    - Without Harmony: list of raw text strings (GPTQModel tokenizes)
+    Priority:
+    1. Pre-rendered JSON file (from generate_harmony_calibration.py)
+    2. Raw wikitext-2 text (GPTQModel tokenizes internally)
+    3. Hardcoded fallback strings
+
+    Returns list of dicts (pre-tokenized) or strings (raw text).
     """
-    # Load raw texts from wikitext
+    # Path 1: pre-rendered Harmony calibration JSON
+    if calibration_path:
+        path = Path(calibration_path)
+        if not path.exists():
+            print(f"ERROR: calibration file not found: {path}")
+            sys.exit(1)
+        payload = json.loads(path.read_text())
+        samples = payload["samples"][:n_samples]
+        total_tokens = sum(len(s["input_ids"]) for s in samples)
+        avg_tokens = total_tokens // len(samples) if samples else 0
+        print(
+            f"Calibration: {len(samples)} pre-rendered samples from {path.name}, "
+            f"format={payload.get('format', 'unknown')}, "
+            f"{total_tokens} total tokens, avg {avg_tokens}"
+        )
+        return samples
+
+    # Path 2: raw wikitext (no Harmony framing)
     try:
         from datasets import load_dataset
         ds = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
         texts = [t for t in ds["text"] if len(t.strip()) > 200]
         texts = texts[:n_samples]
-        print(f"Calibration: {len(texts)} raw texts from wikitext-2")
+        print(f"Calibration: {len(texts)} raw texts from wikitext-2 (no Harmony framing)")
+        return texts
     except Exception as e:
         print(f"Calibration: wikitext unavailable ({e}), using fallback")
-        texts = CALIBRATION_FALLBACK
-
-    if not use_harmony:
-        return texts
-
-    # Wrap in Harmony conversation framing
-    try:
-        from paibaker.tokenizers import (
-            HarmonyTokenizerAdapter,
-            render_conversation_for_completion,
-        )
-        tok = HarmonyTokenizerAdapter()
-        samples = []
-        for text in texts:
-            tokens = render_conversation_for_completion(
-                [{"role": "user", "content": text}],
-                "assistant",
-            )
-            samples.append(
-                {"input_ids": tokens, "attention_mask": [1] * len(tokens)}
-            )
-        print(
-            f"Calibration: {len(samples)} Harmony-framed samples, "
-            f"avg {sum(len(s['input_ids']) for s in samples) // len(samples)} tokens"
-        )
-        return samples
-    except Exception as e:
-        print(f"Calibration: Harmony unavailable ({e}), using raw text")
-        return texts
+        return CALIBRATION_FALLBACK
 
 
 def collect_safetensor_keys(model_dir: Path) -> set[str]:
@@ -141,12 +144,12 @@ def main() -> int:
     )
     parser.add_argument("--output-dir", required=True)
     parser.add_argument(
-        "--calibration-samples", type=int, default=128,
-        help="Number of calibration samples (default: 128)",
+        "--calibration", type=str, default=None,
+        help="Path to pre-rendered calibration JSON (from generate_harmony_calibration.py)",
     )
     parser.add_argument(
-        "--no-harmony", action="store_true",
-        help="Skip Harmony framing, use raw text calibration",
+        "--calibration-samples", type=int, default=128,
+        help="Number of calibration samples to use (default: 128)",
     )
     args = parser.parse_args()
 
@@ -184,7 +187,8 @@ def main() -> int:
     print(f"Model loaded in {time.monotonic() - t0:.1f}s")
 
     calibration = load_calibration(
-        args.calibration_samples, use_harmony=not args.no_harmony,
+        calibration_path=args.calibration,
+        n_samples=args.calibration_samples,
     )
 
     print("Quantizing...")
@@ -213,6 +217,7 @@ def main() -> int:
         },
         "quant_time_seconds": round(quant_time, 1),
         "calibration_samples": len(calibration),
+        "calibration_source": args.calibration or "wikitext-2-raw (no Harmony)",
     }
     meta_path = output_dir / "run_metadata.json"
     meta_path.write_text(json.dumps(meta, indent=2))
