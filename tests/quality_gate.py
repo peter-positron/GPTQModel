@@ -500,12 +500,12 @@ def get_cell_name(meta: dict) -> str:
     return f"{profile}/{gs}/GAR-{gar}"
 
 
-def run_quality_gate(model_dir: Path, device: str) -> dict[str, Any]:
+def run_quality_gate(model_dir: Path, device: str, bf16: bool = False) -> dict[str, Any]:
     """Run full quality gate on one model directory. Returns summary dict."""
     # Read metadata
     meta_path = model_dir / "run_metadata.json"
     meta = json.loads(meta_path.read_text()) if meta_path.exists() else {}
-    cell_name = get_cell_name(meta)
+    cell_name = "bf16/baseline" if bf16 else get_cell_name(meta)
     git_commit = get_git_commit()
 
     print(f"\n{'=' * 70}")
@@ -513,6 +513,7 @@ def run_quality_gate(model_dir: Path, device: str) -> dict[str, Any]:
     print(f"  Model: {model_dir}")
     print(f"  Commit: {git_commit}")
     print(f"  Device: {device}")
+    print(f"  Mode: {'bf16 (unquantized baseline)' if bf16 else 'quantized'}")
     print(f"{'=' * 70}\n")
 
     # Apply paibaker patches if available
@@ -522,13 +523,28 @@ def run_quality_gate(model_dir: Path, device: str) -> dict[str, Any]:
     except ImportError:
         pass
 
-    from gptqmodel import GPTQModel
     from transformers import AutoTokenizer
 
     tokenizer = AutoTokenizer.from_pretrained(str(model_dir))
     print(f"Loading model from {model_dir}...")
     t0 = time.monotonic()
-    model = GPTQModel.load(str(model_dir), device=device)
+
+    if bf16:
+        import torch
+        from transformers import AutoModelForCausalLM
+
+        # bf16 20B model needs ~40GB; single 46GB GPU leaves too little
+        # headroom for KV cache. Use device_map="auto" to spread across GPUs.
+        model = AutoModelForCausalLM.from_pretrained(
+            str(model_dir),
+            torch_dtype=torch.bfloat16,
+            device_map="auto",
+        )
+    else:
+        from gptqmodel import GPTQModel
+
+        model = GPTQModel.load(str(model_dir), device=device)
+
     load_time = time.monotonic() - t0
     print(f"Loaded in {load_time:.1f}s\n")
 
@@ -551,9 +567,11 @@ def run_quality_gate(model_dir: Path, device: str) -> dict[str, Any]:
 
                 # Generate
                 t0 = time.monotonic()
+                # For device_map="auto" (bf16), use the model's input device
+                input_device = device if not bf16 else model.device
                 input_ids = tokenizer(
                     variant_text, return_tensors="pt"
-                ).input_ids.to(device)
+                ).input_ids.to(input_device)
                 output_ids = model.generate(
                     input_ids=input_ids,
                     max_new_tokens=max_tokens,
@@ -785,6 +803,10 @@ def main() -> int:
         help="Path(s) to quantized model directories",
     )
     parser.add_argument("--device", default="cuda:5")
+    parser.add_argument(
+        "--bf16", action="store_true",
+        help="Load as bf16 unquantized model (baseline comparison)",
+    )
     args = parser.parse_args()
 
     # Validate paths
@@ -795,7 +817,7 @@ def main() -> int:
 
     summaries = []
     for model_dir in args.model_dirs:
-        summary = run_quality_gate(model_dir, args.device)
+        summary = run_quality_gate(model_dir, args.device, bf16=args.bf16)
         summaries.append(summary)
 
     print_summary_table(summaries)
