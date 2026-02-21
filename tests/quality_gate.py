@@ -500,6 +500,40 @@ def get_cell_name(meta: dict) -> str:
     return f"{profile}/{gs}/GAR-{gar}"
 
 
+def _read_quant_log(model_dir: Path) -> dict | None:
+    """Read quant_log.csv and compute aggregate loss stats."""
+    log_path = model_dir / "quant_log.csv"
+    if not log_path.exists():
+        return None
+    import csv
+
+    losses = []
+    worst = []
+    with open(log_path) as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            try:
+                loss = float(row["loss"])
+                losses.append(loss)
+                worst.append((int(row["layer"]), row["module"], loss))
+            except (ValueError, KeyError):
+                pass  # skip failsafe entries
+    if not losses:
+        return None
+    worst.sort(key=lambda x: x[2], reverse=True)
+    return {
+        "modules": len(losses),
+        "mean_loss": round(sum(losses) / len(losses), 6),
+        "median_loss": round(sorted(losses)[len(losses) // 2], 6),
+        "sum_loss": round(sum(losses), 2),
+        "max_loss": round(max(losses), 4),
+        "top5_worst": [
+            {"layer": l, "module": m, "loss": round(v, 4)}
+            for l, m, v in worst[:5]
+        ],
+    }
+
+
 def run_quality_gate(model_dir: Path, device: str, bf16: bool = False) -> dict[str, Any]:
     """Run full quality gate on one model directory. Returns summary dict."""
     # Read metadata
@@ -666,16 +700,47 @@ def run_quality_gate(model_dir: Path, device: str, bf16: bool = False) -> dict[s
                 jsonl_f.write(json.dumps(record) + "\n")
                 jsonl_f.flush()
 
+    # Perplexity evaluation (wikitext-2)
+    import torch
+    ppl_avg = None
+    ppl_scores = []
+    try:
+        from gptqmodel.utils.perplexity import Perplexity
+
+        print("\nComputing wikitext-2 perplexity...")
+        t0 = time.monotonic()
+        ppl_obj = Perplexity(
+            model=model,
+            tokenizer=tokenizer,
+            dataset_path="wikitext",
+            dataset_name="wikitext-2-raw-v1",
+            split="test",
+            text_column="text",
+        )
+        with torch.inference_mode():
+            ppl_scores = ppl_obj.calculate(n_ctx=512, n_batch=512)
+        ppl_avg = sum(ppl_scores) / len(ppl_scores) if ppl_scores else None
+        ppl_time = time.monotonic() - t0
+        print(f"Perplexity: {ppl_avg:.2f} ({len(ppl_scores)} chunks, {ppl_time:.1f}s)")
+    except Exception as e:
+        print(f"Perplexity calculation failed: {e}")
+
+    # Read quant_log.csv if available
+    quant_loss = _read_quant_log(model_dir)
+
     # Clean up model to free GPU memory
     del model
     try:
-        import torch
         torch.cuda.empty_cache()
     except Exception:
         pass
 
     # Compute summary
     summary = _compute_summary(results, cell_name, git_commit)
+    summary["perplexity_avg"] = round(ppl_avg, 4) if ppl_avg is not None else None
+    summary["perplexity_chunks"] = len(ppl_scores)
+    if quant_loss:
+        summary["quant_loss"] = quant_loss
 
     # Write summary
     summary_path = model_dir / "quality_gate_summary.json"
@@ -761,19 +826,31 @@ def print_summary_table(summaries: list[dict]) -> None:
     print("QUALITY GATE SUMMARY")
     print(f"{'=' * 80}")
 
-    header = f"{'Cell':<25} {'Loop':<15} {'Derail':<15} {'Capability':<15} {'Gate':<8}"
+    header = f"{'Cell':<25} {'Loop':<15} {'Derail':<15} {'Capability':<15} {'PPL':<10} {'Gate':<8}"
     print(header)
-    print("-" * 80)
+    print("-" * 90)
 
     for s in summaries:
         loop_str = f"{s['loop_count']}/{s['total_generations']} ({s['loop_rate']:.1%})"
         derail_str = f"{s['derail_count']}/{s['derail_total']} ({s['derail_rate']:.1%})"
         cap_str = f"{s['capability_pass_count']}/{s['capability_total']} ({s['capability_pass_rate']:.1%})"
+        ppl_str = f"{s['perplexity_avg']:.2f}" if s.get("perplexity_avg") else "n/a"
         gate_str = "PASS" if s["gate_passed"] else "FAIL"
 
-        print(f"{s['cell']:<25} {loop_str:<15} {derail_str:<15} {cap_str:<15} {gate_str:<8}")
+        print(f"{s['cell']:<25} {loop_str:<15} {derail_str:<15} {cap_str:<15} {ppl_str:<10} {gate_str:<8}")
 
-    print("-" * 80)
+    print("-" * 90)
+
+    # Quant loss summary if available
+    any_loss = any(s.get("quant_loss") for s in summaries)
+    if any_loss:
+        print(f"\n{'Quantization Loss':}")
+        for s in summaries:
+            ql = s.get("quant_loss")
+            if ql:
+                print(f"  {s['cell']}: mean={ql['mean_loss']:.6f}, sum={ql['sum_loss']:.0f}, max={ql['max_loss']:.1f}")
+            else:
+                print(f"  {s['cell']}: n/a (bf16 or no quant_log.csv)")
 
     # Category breakdown
     print(f"\n{'Category Breakdown':}")
