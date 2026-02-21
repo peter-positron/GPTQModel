@@ -114,22 +114,39 @@ def collect_safetensor_keys(model_dir: Path) -> set[str]:
 
 
 def verify_keys(keys: set[str]) -> bool:
+    """Verify expert key layout matches the save format mode.
+
+    In stacked mode: stacked keys present, per-expert keys absent.
+    In per_expert mode: per-expert keys present, stacked keys absent.
+    """
+    mode = os.environ.get("GPTQMODEL_MOE_SAVE_FORMAT", "stacked")
+    print(f"  Save format mode: {mode}")
+
+    if mode == "per_expert":
+        expect_present = UNSTACKED_FRAGMENTS
+        expect_absent = STACKED_FRAGMENTS
+        present_label, absent_label = "per-expert", "stacked"
+    else:
+        expect_present = STACKED_FRAGMENTS
+        expect_absent = UNSTACKED_FRAGMENTS
+        present_label, absent_label = "stacked", "per-expert"
+
     ok = True
-    for frag in STACKED_FRAGMENTS:
+    for frag in expect_present:
         matches = [k for k in keys if frag in k]
         if matches:
-            print(f"  PASS: {len(matches)} keys matching '{frag}'")
+            print(f"  PASS: {len(matches)} {present_label} keys matching '{frag}'")
         else:
-            print(f"  FAIL: no keys matching '{frag}'")
+            print(f"  FAIL: no {present_label} keys matching '{frag}'")
             ok = False
 
-    for frag in UNSTACKED_FRAGMENTS:
+    for frag in expect_absent:
         matches = [k for k in keys if frag in k]
         if matches:
-            print(f"  FAIL: {len(matches)} unstacked keys matching '{frag}'")
+            print(f"  FAIL: {len(matches)} {absent_label} keys matching '{frag}' (should be absent)")
             ok = False
         else:
-            print(f"  PASS: no unstacked keys matching '{frag}'")
+            print(f"  PASS: no {absent_label} keys matching '{frag}'")
 
     return ok
 
