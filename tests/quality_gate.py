@@ -23,6 +23,20 @@ from pathlib import Path
 from typing import Any
 
 # ---------------------------------------------------------------------------
+# Decode configurations
+# ---------------------------------------------------------------------------
+
+DECODE_CONFIGS = {
+    "greedy": {"do_sample": False, "temperature": 1.0},
+    "sampling": {
+        "do_sample": True,
+        "temperature": 0.7,
+        "top_p": 0.9,
+        "repetition_penalty": 1.1,
+    },
+}
+
+# ---------------------------------------------------------------------------
 # Prompt definitions
 # ---------------------------------------------------------------------------
 
@@ -539,12 +553,19 @@ def run_quality_gate(
     device: str,
     bf16: bool = False,
     perplexity_only: bool = False,
+    decode_modes: list[str] | None = None,
+    bf16_baseline: dict | None = None,
 ) -> dict[str, Any]:
     """Run full quality gate on one model directory. Returns summary dict.
 
     If perplexity_only=True, skip generation checks and load existing results
     from quality_gate_results.jsonl. Only runs perplexity + quant_log.
+
+    decode_modes: list of decode config names (default: ["greedy"]).
+    bf16_baseline: loaded bf16 summary dict for delta-based metrics.
     """
+    if decode_modes is None:
+        decode_modes = ["greedy"]
     # Read metadata
     meta_path = model_dir / "run_metadata.json"
     meta = json.loads(meta_path.read_text()) if meta_path.exists() else {}
@@ -611,118 +632,119 @@ def run_quality_gate(
             print("No existing results found — perplexity-only mode, skipping generations")
     else:
         with open(jsonl_path, "w") as jsonl_f:
-            total = sum(len(p["variants"]) for p in PROMPTS)
+            prompts_per_mode = sum(len(p["variants"]) for p in PROMPTS)
+            total = prompts_per_mode * len(decode_modes)
             gen_idx = 0
 
-            for prompt_def in PROMPTS:
-                pid = prompt_def["id"]
-                category = prompt_def["category"]
-                max_tokens = prompt_def["max_new_tokens"]
+            for decode_mode_name in decode_modes:
+                decode_cfg = DECODE_CONFIGS[decode_mode_name]
+                print(f"\n--- Decode mode: {decode_mode_name} ---")
 
-                for variant_idx, variant_text in enumerate(prompt_def["variants"]):
-                    gen_idx += 1
-                    print(f"[{gen_idx}/{total}] {pid} v{variant_idx}: {variant_text[:60]}...")
+                for prompt_def in PROMPTS:
+                    pid = prompt_def["id"]
+                    category = prompt_def["category"]
+                    max_tokens = prompt_def["max_new_tokens"]
 
-                    # Generate
-                    t0 = time.monotonic()
-                    # For device_map="auto" (bf16), use the model's input device
-                    input_device = device if not bf16 else model.device
-                    input_ids = tokenizer(
-                        variant_text, return_tensors="pt"
-                    ).input_ids.to(input_device)
-                    output_ids = model.generate(
-                        input_ids=input_ids,
-                        max_new_tokens=max_tokens,
-                        do_sample=False,
-                        temperature=1.0,
-                    )
-                    gen_time = time.monotonic() - t0
-                    new_token_ids = output_ids[0][input_ids.shape[1]:].tolist()
-                    generated_text = tokenizer.decode(
-                        output_ids[0][input_ids.shape[1]:],
-                        skip_special_tokens=True,
-                    )
-                    n_tokens = len(new_token_ids)
+                    for variant_idx, variant_text in enumerate(prompt_def["variants"]):
+                        gen_idx += 1
+                        print(f"[{gen_idx}/{total}] {pid} v{variant_idx} [{decode_mode_name}]: {variant_text[:50]}...")
 
-                    # Loop detection
-                    loop_metrics = check_loops(new_token_ids, generated_text)
-
-                    # Derail detection (open_ended and instruction only)
-                    anchors = prompt_def.get("anchors", [])
-                    if anchors:
-                        derail_metrics = check_derail(
-                            generated_text, new_token_ids, anchors
+                        # Generate
+                        t0 = time.monotonic()
+                        input_device = device if not bf16 else model.device
+                        input_ids = tokenizer(
+                            variant_text, return_tensors="pt"
+                        ).input_ids.to(input_device)
+                        output_ids = model.generate(
+                            input_ids=input_ids,
+                            max_new_tokens=max_tokens,
+                            **decode_cfg,
                         )
-                    else:
-                        derail_metrics = {
-                            "derail_flag": False,
-                            "anchor_coverage": None,
-                            "anchor_decay": None,
+                        gen_time = time.monotonic() - t0
+                        new_token_ids = output_ids[0][input_ids.shape[1]:].tolist()
+                        generated_text = tokenizer.decode(
+                            output_ids[0][input_ids.shape[1]:],
+                            skip_special_tokens=True,
+                        )
+                        n_tokens = len(new_token_ids)
+
+                        # Loop detection
+                        loop_metrics = check_loops(new_token_ids, generated_text)
+
+                        # Derail detection (open_ended and instruction only)
+                        anchors = prompt_def.get("anchors", [])
+                        if anchors:
+                            derail_metrics = check_derail(
+                                generated_text, new_token_ids, anchors
+                            )
+                        else:
+                            derail_metrics = {
+                                "derail_flag": False,
+                                "anchor_coverage": None,
+                                "anchor_decay": None,
+                            }
+
+                        # Capability check (factual and code only)
+                        checker = prompt_def.get("checker")
+                        if checker:
+                            check_text = (
+                                variant_text + generated_text
+                                if prompt_def["category"] == "code"
+                                else generated_text
+                            )
+                            cap_pass, cap_detail = checker(check_text)
+                            capability = {"capability_pass": cap_pass, "capability_detail": cap_detail}
+                        else:
+                            capability = {"capability_pass": None, "capability_detail": None}
+
+                        # Status line
+                        flags = []
+                        if loop_metrics["loop_flag"]:
+                            flags.append(f"LOOP({','.join(loop_metrics['detectors_triggered'])})")
+                        if derail_metrics["derail_flag"]:
+                            flags.append(f"DERAIL(cov={derail_metrics['anchor_coverage']:.2f})")
+                        if capability["capability_pass"] is False:
+                            flags.append(f"FAIL({capability['capability_detail'][:40]})")
+
+                        status = " ".join(flags) if flags else "OK"
+                        print(f"  {n_tokens} tokens, {gen_time:.1f}s — {status}")
+
+                        # Build record
+                        record = {
+                            "git_commit": git_commit,
+                            "cell": cell_name,
+                            "decode_mode": decode_mode_name,
+                            "prompt_id": pid,
+                            "prompt_variant": variant_idx,
+                            "prompt_category": category,
+                            "prompt_text": variant_text,
+                            "decode_params": {
+                                **decode_cfg,
+                                "max_new_tokens": max_tokens,
+                            },
+                            "tokens_generated": n_tokens,
+                            "gen_time_seconds": round(gen_time, 2),
+                            "loop_flag": loop_metrics["loop_flag"],
+                            "loop_metrics": {
+                                "max_4gram_count": loop_metrics["max_4gram_count"],
+                                "repeat_fraction": loop_metrics["repeat_fraction"],
+                                "min_distinct2": loop_metrics["min_distinct2"],
+                                "max_sentence_count": loop_metrics["max_sentence_count"],
+                                "detectors_triggered": loop_metrics["detectors_triggered"],
+                            },
+                            "derail_flag": derail_metrics["derail_flag"],
+                            "derail_metrics": {
+                                "anchor_coverage": derail_metrics["anchor_coverage"],
+                                "anchor_decay": derail_metrics["anchor_decay"],
+                            },
+                            "capability_pass": capability["capability_pass"],
+                            "capability_detail": capability["capability_detail"],
+                            "raw_text": generated_text[:1000],
                         }
 
-                    # Capability check (factual and code only)
-                    # For code prompts, prepend the prompt so the function
-                    # extractor can find the full def (prompt has the signature,
-                    # generation has the body).
-                    checker = prompt_def.get("checker")
-                    if checker:
-                        check_text = (
-                            variant_text + generated_text
-                            if prompt_def["category"] == "code"
-                            else generated_text
-                        )
-                        cap_pass, cap_detail = checker(check_text)
-                        capability = {"capability_pass": cap_pass, "capability_detail": cap_detail}
-                    else:
-                        capability = {"capability_pass": None, "capability_detail": None}
-
-                    # Status line
-                    flags = []
-                    if loop_metrics["loop_flag"]:
-                        flags.append(f"LOOP({','.join(loop_metrics['detectors_triggered'])})")
-                    if derail_metrics["derail_flag"]:
-                        flags.append(f"DERAIL(cov={derail_metrics['anchor_coverage']:.2f})")
-                    if capability["capability_pass"] is False:
-                        flags.append(f"FAIL({capability['capability_detail'][:40]})")
-
-                    status = " ".join(flags) if flags else "OK"
-                    print(f"  {n_tokens} tokens, {gen_time:.1f}s — {status}")
-
-                    # Build record
-                    record = {
-                        "git_commit": git_commit,
-                        "cell": cell_name,
-                        "prompt_id": pid,
-                        "prompt_variant": variant_idx,
-                        "prompt_category": category,
-                        "prompt_text": variant_text,
-                        "decode_params": {
-                            "do_sample": False,
-                            "max_new_tokens": max_tokens,
-                        },
-                        "tokens_generated": n_tokens,
-                        "gen_time_seconds": round(gen_time, 2),
-                        "loop_flag": loop_metrics["loop_flag"],
-                        "loop_metrics": {
-                            "max_4gram_count": loop_metrics["max_4gram_count"],
-                            "repeat_fraction": loop_metrics["repeat_fraction"],
-                            "min_distinct2": loop_metrics["min_distinct2"],
-                            "max_sentence_count": loop_metrics["max_sentence_count"],
-                            "detectors_triggered": loop_metrics["detectors_triggered"],
-                        },
-                        "derail_flag": derail_metrics["derail_flag"],
-                        "derail_metrics": {
-                            "anchor_coverage": derail_metrics["anchor_coverage"],
-                            "anchor_decay": derail_metrics["anchor_decay"],
-                        },
-                        "capability_pass": capability["capability_pass"],
-                        "capability_detail": capability["capability_detail"],
-                        "raw_text": generated_text[:1000],
-                    }
-
-                    results.append(record)
-                    jsonl_f.write(json.dumps(record) + "\n")
-                    jsonl_f.flush()
+                        results.append(record)
+                        jsonl_f.write(json.dumps(record) + "\n")
+                        jsonl_f.flush()
 
     # Perplexity evaluation (wikitext-2)
     import torch
@@ -759,12 +781,16 @@ def run_quality_gate(
     except Exception:
         pass
 
-    # Compute summary
-    summary = _compute_summary(results, cell_name, git_commit)
+    # Compute summary — group by decode_mode for per-mode stats
+    summary = _compute_summary(results, cell_name, git_commit, bf16_baseline)
     summary["perplexity_avg"] = round(ppl_avg, 4) if ppl_avg is not None else None
     summary["perplexity_chunks"] = len(ppl_scores)
     if quant_loss:
         summary["quant_loss"] = quant_loss
+
+    # Compute PPL ratio vs bf16 baseline
+    if bf16_baseline and ppl_avg and bf16_baseline.get("perplexity_avg"):
+        summary["ppl_ratio"] = round(ppl_avg / bf16_baseline["perplexity_avg"], 4)
 
     # Write summary
     summary_path = model_dir / "quality_gate_summary.json"
@@ -776,40 +802,22 @@ def run_quality_gate(
     return summary
 
 
-def _compute_summary(results: list[dict], cell_name: str, git_commit: str) -> dict:
-    """Compute per-cell summary from generation results."""
+def _compute_mode_stats(results: list[dict]) -> dict:
+    """Compute loop/derail/capability stats for a set of results."""
     total = len(results)
-
-    # Loop rate: across ALL generations
     loop_count = sum(1 for r in results if r["loop_flag"])
     loop_rate = loop_count / total if total else 0.0
 
-    # Derail rate: across open_ended + instruction only
     derail_candidates = [r for r in results if r["prompt_category"] in ("open_ended", "instruction")]
     derail_count = sum(1 for r in derail_candidates if r["derail_flag"])
     derail_total = len(derail_candidates)
     derail_rate = derail_count / derail_total if derail_total else 0.0
 
-    # Capability: across factual + code only
     cap_candidates = [r for r in results if r["capability_pass"] is not None]
     cap_pass_count = sum(1 for r in cap_candidates if r["capability_pass"])
     cap_total = len(cap_candidates)
     cap_rate = cap_pass_count / cap_total if cap_total else 1.0
 
-    # Gate thresholds
-    thresholds = {
-        "loop_rate_max": 0.05,
-        "derail_rate_max": 0.10,
-        "capability_pass_rate_min": 0.95,
-    }
-
-    gate_passed = (
-        loop_rate <= thresholds["loop_rate_max"]
-        and derail_rate <= thresholds["derail_rate_max"]
-        and cap_rate >= thresholds["capability_pass_rate_min"]
-    )
-
-    # Per-category breakdown
     categories: dict[str, dict] = {}
     for cat in ("open_ended", "instruction", "factual", "code"):
         cat_results = [r for r in results if r["prompt_category"] == cat]
@@ -827,8 +835,6 @@ def _compute_summary(results: list[dict], cell_name: str, git_commit: str) -> di
         }
 
     return {
-        "git_commit": git_commit,
-        "cell": cell_name,
         "total_generations": total,
         "loop_rate": round(loop_rate, 4),
         "loop_count": loop_count,
@@ -838,21 +844,123 @@ def _compute_summary(results: list[dict], cell_name: str, git_commit: str) -> di
         "capability_pass_rate": round(cap_rate, 4),
         "capability_pass_count": cap_pass_count,
         "capability_total": cap_total,
-        "gate_passed": gate_passed,
-        "gate_thresholds": thresholds,
         "categories": categories,
     }
 
 
+def _compute_summary(
+    results: list[dict],
+    cell_name: str,
+    git_commit: str,
+    bf16_baseline: dict | None = None,
+) -> dict:
+    """Compute per-cell summary from generation results.
+
+    When bf16_baseline is provided, gate thresholds become delta-based:
+    - loop_delta_max: +5pp above bf16 greedy loop rate
+    - derail_delta_max: +5pp above bf16 greedy derail rate
+    - capability_delta_min: -5pp below bf16 capability rate
+    """
+    # Group results by decode_mode (backward compat: missing = "greedy")
+    by_mode: dict[str, list[dict]] = {}
+    for r in results:
+        mode = r.get("decode_mode", "greedy")
+        by_mode.setdefault(mode, []).append(r)
+
+    # Primary mode for top-level stats and gate: greedy
+    primary_results = by_mode.get("greedy", results)
+    primary = _compute_mode_stats(primary_results)
+
+    # Gate thresholds — delta-based when baseline available
+    if bf16_baseline:
+        bl_greedy = bf16_baseline.get("by_decode_mode", {}).get("greedy", bf16_baseline)
+        bl_loop = bl_greedy.get("loop_rate", bf16_baseline.get("loop_rate", 0.0))
+        bl_derail = bl_greedy.get("derail_rate", bf16_baseline.get("derail_rate", 0.0))
+        bl_cap = bl_greedy.get("capability_pass_rate", bf16_baseline.get("capability_pass_rate", 1.0))
+
+        thresholds = {
+            "mode": "delta",
+            "loop_delta_max": 0.05,    # max 5pp above bf16
+            "derail_delta_max": 0.05,  # max 5pp above bf16
+            "capability_delta_min": -0.05,  # max 5pp below bf16
+            "bf16_loop_rate": bl_loop,
+            "bf16_derail_rate": bl_derail,
+            "bf16_capability_rate": bl_cap,
+        }
+        loop_delta = primary["loop_rate"] - bl_loop
+        derail_delta = primary["derail_rate"] - bl_derail
+        cap_delta = primary["capability_pass_rate"] - bl_cap
+
+        gate_passed = (
+            loop_delta <= thresholds["loop_delta_max"]
+            and derail_delta <= thresholds["derail_delta_max"]
+            and cap_delta >= thresholds["capability_delta_min"]
+        )
+    else:
+        thresholds = {
+            "mode": "absolute",
+            "loop_rate_max": 0.05,
+            "derail_rate_max": 0.10,
+            "capability_pass_rate_min": 0.95,
+        }
+        loop_delta = None
+        derail_delta = None
+        cap_delta = None
+
+        gate_passed = (
+            primary["loop_rate"] <= thresholds["loop_rate_max"]
+            and primary["derail_rate"] <= thresholds["derail_rate_max"]
+            and primary["capability_pass_rate"] >= thresholds["capability_pass_rate_min"]
+        )
+
+    summary = {
+        "git_commit": git_commit,
+        "cell": cell_name,
+        **primary,
+        "gate_passed": gate_passed,
+        "gate_thresholds": thresholds,
+    }
+
+    # Add delta metrics when baseline available
+    if bf16_baseline:
+        summary["delta_vs_bf16"] = {
+            "loop_delta": round(loop_delta, 4),
+            "derail_delta": round(derail_delta, 4),
+            "capability_delta": round(cap_delta, 4),
+        }
+
+    # Add per-mode breakdown when multiple modes were run
+    if len(by_mode) > 1:
+        summary["by_decode_mode"] = {
+            mode: _compute_mode_stats(mode_results)
+            for mode, mode_results in by_mode.items()
+        }
+
+    return summary
+
+
 def print_summary_table(summaries: list[dict]) -> None:
     """Print a comparison table across cells."""
+    has_deltas = any(s.get("delta_vs_bf16") for s in summaries)
+    has_ppl_ratio = any(s.get("ppl_ratio") for s in summaries)
+
     print(f"\n{'=' * 80}")
     print("QUALITY GATE SUMMARY")
+    if has_deltas:
+        print("  (delta mode: thresholds relative to bf16 baseline)")
     print(f"{'=' * 80}")
 
-    header = f"{'Cell':<25} {'Loop':<15} {'Derail':<15} {'Capability':<15} {'PPL':<10} {'Gate':<8}"
+    # Header
+    cols = ["Cell", "Loop", "Derail", "Capability", "PPL"]
+    if has_deltas:
+        cols.extend(["LoopD", "PPL/bf16"])
+    cols.append("Gate")
+    header = f"{'Cell':<25} {'Loop':<15} {'Derail':<15} {'Capability':<15} {'PPL':<10}"
+    if has_deltas:
+        header += f" {'LoopD':<8} {'PPL/bf16':<8}"
+    header += f" {'Gate':<6}"
     print(header)
-    print("-" * 90)
+    print("-" * (96 if has_deltas else 80))
 
     for s in summaries:
         loop_str = f"{s['loop_count']}/{s['total_generations']} ({s['loop_rate']:.1%})"
@@ -861,14 +969,38 @@ def print_summary_table(summaries: list[dict]) -> None:
         ppl_str = f"{s['perplexity_avg']:.2f}" if s.get("perplexity_avg") else "n/a"
         gate_str = "PASS" if s["gate_passed"] else "FAIL"
 
-        print(f"{s['cell']:<25} {loop_str:<15} {derail_str:<15} {cap_str:<15} {ppl_str:<10} {gate_str:<8}")
+        line = f"{s['cell']:<25} {loop_str:<15} {derail_str:<15} {cap_str:<15} {ppl_str:<10}"
+        if has_deltas:
+            d = s.get("delta_vs_bf16", {})
+            ld = d.get("loop_delta")
+            ld_str = f"{ld:+.1%}" if ld is not None else "n/a"
+            pr = s.get("ppl_ratio")
+            pr_str = f"{pr:.2f}x" if pr is not None else "n/a"
+            line += f" {ld_str:<8} {pr_str:<8}"
+        line += f" {gate_str:<6}"
+        print(line)
 
-    print("-" * 90)
+    print("-" * (96 if has_deltas else 80))
+
+    # Per-mode breakdown if multiple decode modes were run
+    any_multimode = any(s.get("by_decode_mode") for s in summaries)
+    if any_multimode:
+        print(f"\nPer-Decode-Mode Breakdown:")
+        for s in summaries:
+            modes = s.get("by_decode_mode", {})
+            if not modes:
+                continue
+            print(f"\n  {s['cell']}:")
+            for mode_name, ms in modes.items():
+                loop_s = f"loop={ms['loop_count']}/{ms['total_generations']} ({ms['loop_rate']:.1%})"
+                derail_s = f"derail={ms['derail_count']}/{ms['derail_total']} ({ms['derail_rate']:.1%})"
+                cap_s = f"cap={ms['capability_pass_count']}/{ms['capability_total']} ({ms['capability_pass_rate']:.1%})"
+                print(f"    {mode_name:<10} {loop_s}, {derail_s}, {cap_s}")
 
     # Quant loss summary if available
     any_loss = any(s.get("quant_loss") for s in summaries)
     if any_loss:
-        print(f"\n{'Quantization Loss':}")
+        print(f"\nQuantization Loss:")
         for s in summaries:
             ql = s.get("quant_loss")
             if ql:
@@ -877,7 +1009,7 @@ def print_summary_table(summaries: list[dict]) -> None:
                 print(f"  {s['cell']}: n/a (bf16 or no quant_log.csv)")
 
     # Category breakdown
-    print(f"\n{'Category Breakdown':}")
+    print(f"\nCategory Breakdown:")
     for s in summaries:
         print(f"\n  {s['cell']}:")
         for cat, data in s.get("categories", {}).items():
@@ -912,7 +1044,27 @@ def main() -> int:
         "--perplexity-only", action="store_true",
         help="Skip generation checks, load existing results, only compute perplexity",
     )
+    parser.add_argument(
+        "--decode-modes", nargs="+", default=["greedy"],
+        choices=list(DECODE_CONFIGS),
+        help="Decode modes to evaluate (default: greedy). Use 'greedy sampling' for both.",
+    )
+    parser.add_argument(
+        "--bf16-baseline", type=Path, default=None,
+        help="Path to bf16 quality_gate_summary.json for delta-based thresholds",
+    )
     args = parser.parse_args()
+
+    # Load bf16 baseline if provided
+    bf16_baseline = None
+    if args.bf16_baseline:
+        if not args.bf16_baseline.exists():
+            print(f"ERROR: bf16 baseline not found: {args.bf16_baseline}")
+            return 1
+        bf16_baseline = json.loads(args.bf16_baseline.read_text())
+        bl_loop = bf16_baseline.get("loop_rate", "?")
+        bl_ppl = bf16_baseline.get("perplexity_avg", "?")
+        print(f"bf16 baseline loaded: loop={bl_loop}, PPL={bl_ppl}")
 
     # Validate paths
     for d in args.model_dirs:
@@ -925,6 +1077,8 @@ def main() -> int:
         summary = run_quality_gate(
             model_dir, args.device, bf16=args.bf16,
             perplexity_only=args.perplexity_only,
+            decode_modes=args.decode_modes,
+            bf16_baseline=bf16_baseline,
         )
         summaries.append(summary)
 
