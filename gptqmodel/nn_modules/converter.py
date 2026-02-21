@@ -20,7 +20,27 @@ def convert_gpt_oss_expert_converter(module, config):
             self.experts = experts_new
 
         def forward(self, hidden_states):
-            router_scores, router_indices = self.router(hidden_states)  # (num_experts, seq_len)
+            import torch
+
+            # Original GptOssTopKRouter returns (logits, scores, indices)
+            # with 3D shapes (batch, seq, experts) because it doesn't flatten.
+            # GptOssTopKRouterNew returns (scores, indices) with 2D shapes
+            # (flat_tokens, experts) because it reshapes first.
+            # GptOssExpertsNew expects the 2D scattered format.
+            router_out = self.router(hidden_states)
+            if len(router_out) == 3:
+                router_logits, router_top_scores, router_indices = router_out
+                # Flatten from (batch, seq, ...) to (flat_tokens, ...)
+                orig_shape = router_logits.shape[:-1]  # (batch, seq)
+                router_logits = router_logits.reshape(-1, router_logits.shape[-1])
+                router_top_scores = router_top_scores.reshape(-1, router_top_scores.shape[-1])
+                router_indices = router_indices.reshape(-1, router_indices.shape[-1])
+                # Scatter top-k scores into full expert matrix
+                router_scores = torch.zeros_like(router_logits).scatter_(
+                    1, router_indices, router_top_scores,
+                )
+            else:
+                router_scores, router_indices = router_out
             routed_out = self.experts(hidden_states, router_indices=router_indices, routing_weights=router_scores)
             return routed_out, router_scores
 
