@@ -612,6 +612,34 @@ def run_quality_gate(
 
         model = GPTQModel.load(str(model_dir), device=device)
 
+        # Expert weight integrity check: fail fast if per-expert modules
+        # have empty or missing qweight tensors (silently-dropped experts).
+        expert_gate_up = {}
+        expert_down = {}
+        for name, module in model.model.named_modules():
+            if hasattr(module, "qweight") and module.qweight is not None:
+                if ".experts.gate_up." in name:
+                    expert_gate_up[name] = module.qweight.numel()
+                elif ".experts.down." in name:
+                    expert_down[name] = module.qweight.numel()
+
+        if expert_gate_up or expert_down:
+            empty_experts = [
+                n for n, numel in {**expert_gate_up, **expert_down}.items() if numel == 0
+            ]
+            if empty_experts:
+                raise RuntimeError(
+                    f"Expert weight integrity FAILED: {len(empty_experts)} expert(s) have "
+                    f"empty qweight tensors: {empty_experts[:5]}"
+                )
+            print(
+                f"Expert integrity OK: {len(expert_gate_up)} gate_up + "
+                f"{len(expert_down)} down modules with non-empty qweight"
+            )
+        else:
+            print("WARNING: No per-expert quantized modules found — "
+                  "expected gate_up.N / down.N with qweight attribute")
+
     load_time = time.monotonic() - t0
     print(f"Loaded in {load_time:.1f}s\n")
 
