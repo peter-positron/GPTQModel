@@ -592,25 +592,47 @@ def run_quality_gate(
 
     from transformers import AutoTokenizer
 
-    tokenizer = AutoTokenizer.from_pretrained(str(model_dir))
+    # Harmony tokenizer auto_map has multi-dot module path that
+    # transformers can't resolve from local dirs.  Pre-load directly
+    # and monkey-patch AutoTokenizer so GPTQModel.load() succeeds.
+    _orig_at_fp = AutoTokenizer.from_pretrained
+    _preloaded_tokenizer = None
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(str(model_dir), trust_remote_code=True)
+    except (ValueError, ImportError):
+        from paibaker.tokenizers.harmony_adapter import HarmonyTokenizerAdapter
+        tokenizer = HarmonyTokenizerAdapter.from_pretrained(str(model_dir))
+        _preloaded_tokenizer = tokenizer
+        _model_dir_str = str(model_dir)
+        def _patched_at_fp(pretrained_model_name_or_path, *a, **kw):
+            if str(pretrained_model_name_or_path) == _model_dir_str:
+                return _preloaded_tokenizer
+            return _orig_at_fp(pretrained_model_name_or_path, *a, **kw)
+        AutoTokenizer.from_pretrained = staticmethod(_patched_at_fp)
+
     print(f"Loading model from {model_dir}...")
     t0 = time.monotonic()
 
-    if bf16:
-        import torch
-        from transformers import AutoModelForCausalLM
+    try:
+        if bf16:
+            import torch
+            from transformers import AutoModelForCausalLM
 
-        # bf16 20B model needs ~40GB; single 46GB GPU leaves too little
-        # headroom for KV cache. Use device_map="auto" to spread across GPUs.
-        model = AutoModelForCausalLM.from_pretrained(
-            str(model_dir),
-            torch_dtype=torch.bfloat16,
-            device_map="auto",
-        )
-    else:
-        from gptqmodel import GPTQModel
+            # bf16 20B model needs ~40GB; single 46GB GPU leaves too little
+            # headroom for KV cache. Use device_map="auto" to spread across GPUs.
+            model = AutoModelForCausalLM.from_pretrained(
+                str(model_dir),
+                torch_dtype=torch.bfloat16,
+                device_map="auto",
+            )
+        else:
+            from gptqmodel import GPTQModel
 
-        model = GPTQModel.load(str(model_dir), device=device)
+            model = GPTQModel.load(str(model_dir), device=device, trust_remote_code=True)
+    finally:
+        # Restore original AutoTokenizer.from_pretrained
+        if _preloaded_tokenizer is not None:
+            AutoTokenizer.from_pretrained = _orig_at_fp
 
         # Expert weight integrity check: fail fast if per-expert modules
         # have empty or missing qweight tensors (silently-dropped experts).
