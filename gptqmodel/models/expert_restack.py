@@ -7,7 +7,7 @@ from __future__ import annotations
 import re
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Dict, FrozenSet, List, Set, Tuple
+from typing import TYPE_CHECKING, Dict, FrozenSet, List, Optional, Set, Tuple
 
 import torch
 
@@ -30,6 +30,10 @@ class ExpertRestackSpec:
         stacking (only applies to float weights, not GPTQ suffixes)
     stacked_suffix_overrides: maps suffix to custom stacked key
         ending, e.g. {"weight": "", "bias": "_bias"}
+    target_dtype: optional dtype to cast stacked floating-point
+        tensors to.  When set, stacked tensors are cast after
+        stacking and transposing so the on-disk artifact has the
+        correct dtype.  None (default) preserves source dtype.
     """
 
     unstacked_template: str
@@ -40,6 +44,7 @@ class ExpertRestackSpec:
     stacked_suffix_overrides: Dict[str, str] = field(
         default_factory=dict,
     )
+    target_dtype: Optional[torch.dtype] = None
 
 
 def restack_moe_experts(
@@ -105,6 +110,13 @@ def restack_moe_experts(
 
             if suffix in spec.transpose_suffixes:
                 stacked = stacked.transpose(-1, -2).contiguous()
+
+            if (
+                spec.target_dtype is not None
+                and stacked.is_floating_point()
+                and stacked.dtype != spec.target_dtype
+            ):
+                stacked = stacked.to(spec.target_dtype)
 
             # Compute stacked key name
             if suffix in spec.stacked_suffix_overrides:

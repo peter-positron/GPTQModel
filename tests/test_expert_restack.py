@@ -332,3 +332,128 @@ class TestLlama4NoTranspose:
                         f"{prefix}.{grp}.{i}.{suffix}"
                         not in result
                     )
+
+
+class TestTargetDtypeEnforced:
+    """When target_dtype is set, stacked floating-point tensors are
+    cast to the requested dtype."""
+
+    def test_fp32_to_bf16(self):
+        spec = ExpertRestackSpec(
+            unstacked_template="gate_up.{expert}",
+            stacked_name="gate_up_proj",
+            stacked_suffix_overrides={"weight": ""},
+            target_dtype=torch.bfloat16,
+        )
+        sd = {}
+        prefix = "model.layers.0.mlp.experts"
+        for i in range(NUM_EXPERTS):
+            t = torch.randn(A, B, dtype=torch.float32)
+            key = f"{prefix}.gate_up.{i}.weight"
+            sd[key] = _make_ts(key, t)
+
+        result = restack_moe_experts(sd, [spec], _make_config())
+
+        stacked_key = f"{prefix}.gate_up_proj"
+        assert stacked_key in result
+        stacked = result[stacked_key].source
+        assert stacked.dtype == torch.bfloat16
+        # Shape: transposed [E, B, A] (weight in transpose_suffixes)
+        assert stacked.shape == (NUM_EXPERTS, B, A)
+
+    def test_fp16_to_bf16(self):
+        spec = ExpertRestackSpec(
+            unstacked_template="down.{expert}",
+            stacked_name="down_proj",
+            stacked_suffix_overrides={"weight": ""},
+            target_dtype=torch.bfloat16,
+        )
+        sd = {}
+        prefix = "model.layers.0.mlp.experts"
+        for i in range(NUM_EXPERTS):
+            t = torch.randn(B, A, dtype=torch.float16)
+            key = f"{prefix}.down.{i}.weight"
+            sd[key] = _make_ts(key, t)
+
+        result = restack_moe_experts(sd, [spec], _make_config())
+
+        stacked_key = f"{prefix}.down_proj"
+        assert stacked_key in result
+        assert result[stacked_key].source.dtype == torch.bfloat16
+
+    def test_bf16_stays_bf16_no_extra_cast(self):
+        """bf16 input with target_dtype=bf16 is a no-op (no copy)."""
+        spec = ExpertRestackSpec(
+            unstacked_template="gate_up.{expert}",
+            stacked_name="gate_up_proj",
+            stacked_suffix_overrides={"weight": ""},
+            target_dtype=torch.bfloat16,
+        )
+        sd = {}
+        prefix = "model.layers.0.mlp.experts"
+        for i in range(NUM_EXPERTS):
+            t = torch.randn(A, B, dtype=torch.bfloat16)
+            key = f"{prefix}.gate_up.{i}.weight"
+            sd[key] = _make_ts(key, t)
+
+        result = restack_moe_experts(sd, [spec], _make_config())
+
+        stacked = result[f"{prefix}.gate_up_proj"].source
+        assert stacked.dtype == torch.bfloat16
+
+    def test_qweight_int_not_cast(self):
+        """Integer tensors (qweight) are not cast even with
+        target_dtype set — is_floating_point() is false."""
+        spec = ExpertRestackSpec(
+            unstacked_template="gate_up.{expert}",
+            stacked_name="gate_up_proj",
+            stacked_suffix_overrides={"weight": ""},
+            target_dtype=torch.bfloat16,
+        )
+        sd = {}
+        prefix = "model.layers.0.mlp.experts"
+        for i in range(NUM_EXPERTS):
+            t = torch.randint(0, 100, (A, B), dtype=torch.int32)
+            key = f"{prefix}.gate_up.{i}.qweight"
+            sd[key] = _make_ts(key, t)
+
+        result = restack_moe_experts(sd, [spec], _make_config())
+
+        stacked_key = f"{prefix}.gate_up_proj.qweight"
+        assert stacked_key in result
+        assert result[stacked_key].source.dtype == torch.int32
+
+
+class TestTargetDtypePassthrough:
+    """When target_dtype is None (default), source dtype is
+    preserved exactly."""
+
+    def test_fp32_stays_fp32(self):
+        sd = {}
+        prefix = "model.layers.0.mlp.experts"
+        for i in range(NUM_EXPERTS):
+            t = torch.randn(A, B, dtype=torch.float32)
+            key = f"{prefix}.gate_up.{i}.weight"
+            sd[key] = _make_ts(key, t)
+
+        result = restack_moe_experts(
+            sd, [GATE_UP_SPEC], _make_config()
+        )
+
+        stacked = result[f"{prefix}.gate_up_proj"].source
+        assert stacked.dtype == torch.float32
+
+    def test_fp16_stays_fp16(self):
+        sd = {}
+        prefix = "model.layers.0.mlp.experts"
+        for i in range(NUM_EXPERTS):
+            t = torch.randn(A, B, dtype=torch.float16)
+            key = f"{prefix}.gate_up.{i}.weight"
+            sd[key] = _make_ts(key, t)
+
+        result = restack_moe_experts(
+            sd, [GATE_UP_SPEC], _make_config()
+        )
+
+        stacked = result[f"{prefix}.gate_up_proj"].source
+        assert stacked.dtype == torch.float16
