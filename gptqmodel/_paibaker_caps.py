@@ -11,7 +11,7 @@ Paibaker patches read these capabilities to decide whether to apply
 
 from __future__ import annotations
 
-FORK_VERSION = "paibaker-2026.02.25+ad4991af"
+FORK_VERSION = "paibaker-2026.02.25+pretok-json"
 
 
 def get_caps() -> dict[str, bool]:
@@ -65,5 +65,18 @@ def get_caps() -> dict[str, bool]:
         )
     except ImportError:
         caps["gpt_oss_meta_device_init"] = False
+
+    # -- Pre-tokenized calibration JSON support --
+    # Sentinel: calibration.PRETOKENIZED_CALIBRATION_JSON_SUPPORTED
+    try:
+        from gptqmodel.utils import calibration as _calib_mod
+
+        caps["pretokenized_calibration_json"] = getattr(
+            _calib_mod,
+            "PRETOKENIZED_CALIBRATION_JSON_SUPPORTED",
+            False,
+        )
+    except ImportError:
+        caps["pretokenized_calibration_json"] = False
 
     return caps

@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+import json
+import os
 import random
 from typing import Any, Dict, List, Optional, Sequence, Union
 
@@ -27,6 +29,7 @@ CalibrationInputType = Union[
     List[Dict[str, Union[List[int], torch.LongTensor]]],
     List[str],
     List[List[int]],
+    str,
     "HFDataset",  # type: ignore[type-arg]
     "HFIterableDataset",  # type: ignore[type-arg]
 ]
@@ -48,6 +51,137 @@ def batched(iterable, batch_size: int, process_func=None):
 
     if batch:
         yield batch
+
+
+PRETOKENIZED_CALIBRATION_JSON_SUPPORTED = True
+
+
+def load_pretokenized_json(
+    path: str,
+    *,
+    nsamples: int | None = None,
+) -> list[dict[str, list[int]]]:
+    """Load pre-tokenized calibration samples from a JSON or JSONL file.
+
+    Accepted formats:
+    - JSON array: ``[{input_ids: [...], ...}, ...]``
+    - JSON wrapper: ``{"samples": [{input_ids: [...], ...}, ...]}``
+    - JSONL: one ``{input_ids: [...], ...}`` per line
+
+    Each sample must have ``input_ids`` as ``list[int]``.
+    ``attention_mask`` is optional; when absent it is inferred as all-ones.
+
+    Returns plain Python lists (no torch dependency).
+    """
+    with open(path, "r", encoding="utf-8") as fh:
+        first_line = fh.readline()
+
+    first_line_stripped = first_line.strip()
+    if not first_line_stripped:
+        raise ValueError(f"Pretokenized calibration file is empty: {path}")
+
+    # Detect JSONL: first line parses as a single object (not array/wrapper)
+    is_jsonl = False
+    try:
+        probe = json.loads(first_line_stripped)
+        if isinstance(probe, dict) and "input_ids" in probe:
+            is_jsonl = True
+    except json.JSONDecodeError:
+        pass
+
+    if is_jsonl:
+        samples: list[dict[str, Any]] = []
+        with open(path, "r", encoding="utf-8") as fh:
+            for lineno, line in enumerate(fh, 1):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    raise ValueError(
+                        f"Invalid JSON on line {lineno} of {path}"
+                    ) from exc
+                if not isinstance(obj, dict):
+                    raise ValueError(
+                        f"Expected object on line {lineno} of {path}, "
+                        f"got {type(obj).__name__}"
+                    )
+                samples.append(obj)
+    else:
+        with open(path, "r", encoding="utf-8") as fh:
+            try:
+                data = json.load(fh)
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    f"Failed to parse JSON from {path}"
+                ) from exc
+
+        if isinstance(data, dict):
+            if "samples" not in data:
+                raise ValueError(
+                    f"Wrapper object in {path} missing 'samples' key; "
+                    f"found keys: {sorted(data.keys())}"
+                )
+            data = data["samples"]
+
+        if not isinstance(data, list):
+            raise ValueError(
+                f"Expected JSON array or {{\"samples\": [...]}} in {path}, "
+                f"got {type(data).__name__}"
+            )
+        samples = data
+
+    if not samples:
+        raise ValueError(f"No samples found in {path}")
+
+    # Validate and normalize each sample
+    validated: list[dict[str, list[int]]] = []
+    for idx, sample in enumerate(samples):
+        if not isinstance(sample, dict):
+            raise ValueError(
+                f"Sample {idx} in {path} must be a dict, "
+                f"got {type(sample).__name__}"
+            )
+        if "input_ids" not in sample:
+            raise ValueError(
+                f"Sample {idx} in {path} missing 'input_ids'; "
+                f"keys: {sorted(sample.keys())}"
+            )
+        input_ids = sample["input_ids"]
+        if not isinstance(input_ids, list) or not all(
+            isinstance(x, int) for x in input_ids
+        ):
+            raise ValueError(
+                f"Sample {idx} in {path}: 'input_ids' must be list[int]"
+            )
+
+        if "attention_mask" in sample:
+            mask = sample["attention_mask"]
+            if not isinstance(mask, list) or not all(
+                isinstance(x, int) for x in mask
+            ):
+                raise ValueError(
+                    f"Sample {idx} in {path}: "
+                    f"'attention_mask' must be list[int]"
+                )
+            if len(mask) != len(input_ids):
+                raise ValueError(
+                    f"Sample {idx} in {path}: attention_mask length "
+                    f"{len(mask)} != input_ids length {len(input_ids)}"
+                )
+        else:
+            mask = [1] * len(input_ids)
+
+        validated.append({
+            "input_ids": input_ids,
+            "attention_mask": mask,
+        })
+
+    if nsamples is not None and len(validated) > nsamples:
+        validated = validated[:nsamples]
+
+    return validated
 
 
 def prepare_calibration_dataset(
@@ -78,7 +212,14 @@ def prepare_calibration_dataset(
         hf_dataset_types += (HFIterableDataset,)
 
     if isinstance(calibration_dataset, str):
-        raise ValueError("Quantize: calibration dataset must be iterable, not a single string.")
+        if os.path.isfile(calibration_dataset):
+            calibration_dataset = load_pretokenized_json(calibration_dataset)
+        else:
+            raise ValueError(
+                "Quantize: calibration dataset must be iterable, "
+                "not a single string. If you meant to pass a file "
+                f"path, the file does not exist: {calibration_dataset}"
+            )
 
     if hf_dataset_types and isinstance(calibration_dataset, hf_dataset_types):
         raw_examples = list(calibration_dataset)
@@ -461,4 +602,8 @@ def prepare_calibration_dataset(
     return new_calibration_dataset_batched
 
 
-__all__ = ["batched", "prepare_calibration_dataset"]
+__all__ = [
+    "batched",
+    "load_pretokenized_json",
+    "prepare_calibration_dataset",
+]
