@@ -38,19 +38,11 @@ def _make_fake_ori_experts(config, device="cpu"):
     d = config.intermediate_size
 
     # [ne, h, 2*d] -- transposed by init to [2*d, h] for Linear
-    ori.gate_up_proj = nn.Parameter(
-        torch.randn(ne, h, 2 * d, device=device)
-    )
-    ori.gate_up_proj_bias = nn.Parameter(
-        torch.randn(ne, 2 * d, device=device)
-    )
+    ori.gate_up_proj = nn.Parameter(torch.randn(ne, h, 2 * d, device=device))
+    ori.gate_up_proj_bias = nn.Parameter(torch.randn(ne, 2 * d, device=device))
     # [ne, d, h] -- transposed by init to [h, d] for Linear
-    ori.down_proj = nn.Parameter(
-        torch.randn(ne, d, h, device=device)
-    )
-    ori.down_proj_bias = nn.Parameter(
-        torch.randn(ne, h, device=device)
-    )
+    ori.down_proj = nn.Parameter(torch.randn(ne, d, h, device=device))
+    ori.down_proj_bias = nn.Parameter(torch.randn(ne, h, device=device))
     return ori
 
 
@@ -59,12 +51,8 @@ def _make_fake_ori_router(config, device="cpu"):
     router = nn.Module()
     ne = config.num_local_experts
     h = config.hidden_size
-    router.weight = nn.Parameter(
-        torch.randn(ne, h, device=device)
-    )
-    router.bias = nn.Parameter(
-        torch.randn(ne, device=device)
-    )
+    router.weight = nn.Parameter(torch.randn(ne, h, device=device))
+    router.bias = nn.Parameter(torch.randn(ne, device=device))
     return router
 
 
@@ -175,12 +163,8 @@ class TestCorruptionSync:
         assert len(synced) == 1
         assert "model.embed_tokens.weight" in synced
         # Verify data was actually synced
-        shell_p = dict(shell.named_parameters())[
-            "model.embed_tokens.weight"
-        ]
-        turtle_p = dict(turtle.named_parameters())[
-            "model.embed_tokens.weight"
-        ]
+        shell_p = dict(shell.named_parameters())["model.embed_tokens.weight"]
+        turtle_p = dict(turtle.named_parameters())["model.embed_tokens.weight"]
         assert torch.allclose(shell_p, turtle_p)
 
     def test_syncs_near_zero_std(self):

@@ -11,7 +11,7 @@ Paibaker patches read these capabilities to decide whether to apply
 
 from __future__ import annotations
 
-FORK_VERSION = "paibaker-2026.02.25+0505aebb"
+FORK_VERSION = "paibaker-2026.02.25+ad4991af"
 
 
 def get_caps() -> dict[str, bool]:
