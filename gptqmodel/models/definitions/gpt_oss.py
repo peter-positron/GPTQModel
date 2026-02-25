@@ -8,6 +8,13 @@ from torch import nn
 
 from ..base import BaseQModel
 from ..expert_restack import ExpertRestackSpec
+from ...utils.logger import setup_logger
+
+log = setup_logger()
+
+# Capability sentinels -- read by paibaker CAPS system via get_caps()
+GPT_OSS_META_DEVICE_INIT_SUPPORTED = True
+GPT_OSS_CORRUPTION_SYNC_SUPPORTED = True
 
 
 class GptOssExpertsNew(nn.Module):
@@ -52,6 +59,30 @@ class GptOssExpertsNew(nn.Module):
                     gu_b_src = ori_experts.gate_up_proj_bias[i].detach()
                     d_w_src = ori_experts.down_proj[i].detach().t().contiguous()
                     d_b_src = ori_experts.down_proj_bias[i].detach()
+
+                # Handle meta device tensors from shell model
+                if gu_w_src.device.type == 'meta':
+                    self.gate_up[i].weight = nn.Parameter(
+                        torch.empty_like(
+                            self.gate_up[i].weight, device='meta'
+                        )
+                    )
+                    self.gate_up[i].bias = nn.Parameter(
+                        torch.empty_like(
+                            self.gate_up[i].bias, device='meta'
+                        )
+                    )
+                    self.down[i].weight = nn.Parameter(
+                        torch.empty_like(
+                            self.down[i].weight, device='meta'
+                        )
+                    )
+                    self.down[i].bias = nn.Parameter(
+                        torch.empty_like(
+                            self.down[i].bias, device='meta'
+                        )
+                    )
+                    continue
 
                 with torch.inference_mode():
                     self.gate_up[i].weight.copy_(gu_w_src)
@@ -126,9 +157,17 @@ class GptOssTopKRouterNew(nn.Module):
         self.bias = nn.Parameter(torch.empty(self.num_experts))
 
         if ori_router is not None:
-            with torch.inference_mode():
-                self.weight.copy_(ori_router.weight.detach())
-                self.bias.copy_(ori_router.bias.detach())
+            if ori_router.weight.device.type == 'meta':
+                self.weight = nn.Parameter(
+                    torch.empty_like(self.weight, device='meta')
+                )
+                self.bias = nn.Parameter(
+                    torch.empty_like(self.bias, device='meta')
+                )
+            else:
+                with torch.inference_mode():
+                    self.weight.copy_(ori_router.weight.detach())
+                    self.bias.copy_(ori_router.bias.detach())
 
         # Prevent transformers _init_weights from clobbering weights
         self._is_hf_initialized = True
@@ -142,6 +181,98 @@ class GptOssTopKRouterNew(nn.Module):
         # Return 3 values to match original GptOssTopKRouter interface
         # expected by GptOssMLP.forward(): (logits, scores, indices)
         return router_logits, router_scores, router_indices
+
+_NON_QUANTIZED_SYNC_PATTERNS = (
+    '.embed_tokens.',
+    '.lm_head.',
+    '.input_layernorm.',
+    '.post_attention_layernorm.',
+    '.norm.',
+    '.self_attn.sinks',
+    '.mlp.router.weight',
+    '.mlp.router.bias',
+)
+
+
+def _sync_non_quantized_from_turtle(
+    shell_model, turtle_model,
+) -> list[str]:
+    """Sync non-quantized weights from turtle to shell model.
+
+    alias_all_from_turtle_if_meta skips modules with class mismatches
+    (GptOssExperts -> GptOssExpertsNew). This parameter-level sync
+    catches what the module-level swap misses.
+
+    Returns list of synced parameter names.
+    """
+    if turtle_model is None:
+        return []
+
+    synced: list[str] = []
+    shell_params = dict(shell_model.named_parameters())
+    turtle_params = dict(turtle_model.named_parameters())
+
+    for name, shell_param in shell_params.items():
+        if not any(p in name for p in _NON_QUANTIZED_SYNC_PATTERNS):
+            continue
+
+        turtle_param = turtle_params.get(name)
+        if turtle_param is None:
+            continue
+
+        if shell_param.shape != turtle_param.shape:
+            log.debug(
+                "Shape mismatch for %s: shell=%s, turtle=%s",
+                name, shell_param.shape, turtle_param.shape,
+            )
+            continue
+
+        # Corruption detection: deterministic checks first
+        is_meta = shell_param.device.type == 'meta'
+        needs_sync = is_meta
+
+        if not needs_sync:
+            # All-zeros: definitive corruption signal
+            needs_sync = shell_param.count_nonzero().item() == 0
+
+        if not needs_sync:
+            # All-constant: definitive corruption signal
+            needs_sync = (
+                shell_param.min().item() == shell_param.max().item()
+            )
+
+        if not needs_sync:
+            # Std ratio heuristic: shell variance near-zero vs turtle
+            try:
+                p_std = shell_param.float().std().item()
+                t_std = turtle_param.float().std().item()
+                if t_std > 0.01:
+                    needs_sync = (
+                        p_std < 0.001
+                        or (p_std / t_std) < 0.01
+                    )
+            except Exception:
+                pass
+
+        if needs_sync:
+            try:
+                with torch.inference_mode():
+                    target_device = (
+                        turtle_param.device
+                        if is_meta
+                        else shell_param.device
+                    )
+                    turtle_data = turtle_param.data.to(target_device)
+                    if is_meta:
+                        shell_param.data = turtle_data.clone()
+                    else:
+                        shell_param.data.copy_(turtle_data)
+                synced.append(name)
+            except Exception as e:
+                log.warning("Failed to sync %s: %s", name, e)
+
+    return synced
+
 
 class GPTOSSGPTQ(BaseQModel):
     # Disable shell/turtle disk offload — the default materialization
@@ -188,6 +319,25 @@ class GPTOSSGPTQ(BaseQModel):
             },
         },
     ]
+
+    def pre_save_sync(self):
+        """Sync non-quantized params from turtle before save.
+
+        alias_all_from_turtle_if_meta skips modules with class
+        mismatches (GptOssExperts -> GptOssExpertsNew). This
+        parameter-level sync catches what the module-level swap misses.
+        """
+        turtle = getattr(self, 'turtle_model', None)
+        if turtle is None:
+            return
+        synced = _sync_non_quantized_from_turtle(
+            self.model, turtle,
+        )
+        if synced:
+            log.info(
+                "GPT-OSS pre-save sync: restored "
+                "%d non-quantized tensors", len(synced),
+            )
 
     def before_model_load(self, load_quantized_model=False):
         if load_quantized_model:

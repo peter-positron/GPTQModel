@@ -301,6 +301,11 @@ def ModelWriter(cls):
 
         # Due to shell/turtle state, we need to sync the modules from turtle to shell
         if not self.load_quantized_model:
+            # Model-specific pre-save sync (e.g., GPT-OSS
+            # parameter-level corruption repair for class-replaced
+            # modules).
+            if hasattr(self, 'pre_save_sync'):
+                self.pre_save_sync()
             alias_all_from_turtle_if_meta(shell_model=self.model, turtle_model=self.turtle_model)
 
         offload_root = self.quantize_config.offload_to_disk_path if getattr(self.quantize_config, "offload_to_disk", False) else None
