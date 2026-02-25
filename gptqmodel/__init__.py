@@ -54,6 +54,7 @@ from .quantization import BaseQuantizeConfig, GPTAQConfig, QuantizeConfig
 from .utils import BACKEND
 from .utils.exllama import exllama_set_max_input_length
 from .version import __version__
+from ._paibaker_caps import FORK_VERSION, get_caps
 
 
 setup_logger().info("\n%s", ASCII_LOGO)
