@@ -533,6 +533,46 @@ def convert_awq_file(path: Path, target_dtype: torch.dtype, device: str) -> Dict
     return tensors
 
 
+# V1 checkpoint format stored qzeros with a -1 offset (qzeros -= 1 before
+# serialization).  Inference kernels reverse this at load time via
+# convert_gptq_v1_to_v2_format_module(), but the safetensor-level dequant
+# path must do the same correction before unpacking.
+#
+# Bit patterns are identical to gptqmodel/utils/model.py but operate on a
+# raw tensor instead of a BaseQuantLinear module.
+_V1_V2_OFFSETS_INT32: dict[int, int] = {
+    2: 0b01010101010101010101010101010101,
+    4: 0b00010001000100010001000100010001,
+    8: 0b00000001000000010000000100000001,
+}
+
+
+def _apply_v1_to_v2_qzeros(
+    qzeros: torch.Tensor, bits: int,
+) -> None:
+    """In-place V1->V2 zero-point correction on packed qzeros."""
+    if bits == 3:
+        raise NotImplementedError(
+            "3-bit V1->V2 correction in dequant path not yet implemented"
+        )
+    pack_bits = qzeros.element_size() * 8
+    base = _V1_V2_OFFSETS_INT32.get(bits)
+    if base is None:
+        raise ValueError(f"Unsupported bit width {bits} for V1->V2 correction")
+    # Scale the 32-bit pattern to match the actual pack dtype width.
+    if pack_bits == 32:
+        offset = base
+    elif pack_bits == 16:
+        offset = base & 0xFFFF
+    elif pack_bits == 8:
+        offset = base & 0xFF
+    elif pack_bits == 64:
+        offset = base | (base << 32)
+    else:
+        raise ValueError(f"Unsupported pack dtype width {pack_bits}")
+    qzeros.data += offset
+
+
 def convert_gptq_file(path: Path, target_dtype: torch.dtype, config: dict, device: str) -> Dict[str, torch.Tensor]:
     tensors: Dict[str, torch.Tensor] = {}
     module_buffers: Dict[str, Dict[str, torch.Tensor]] = defaultdict(dict)
@@ -569,6 +609,14 @@ def convert_gptq_file(path: Path, target_dtype: torch.dtype, config: dict, devic
         g_idx = buf["g_idx"].to(torch.long)
 
         bits = config.get("bits", 4)
+
+        # V1 format (checkpoint_format in {"gptq", "gemm", ""}) stores
+        # qzeros with a -1 offset.  Correct before unpacking so the
+        # dequant formula uses the true zero-point values.
+        ckpt_fmt = config.get("checkpoint_format", "gptq")
+        if ckpt_fmt in ("gptq", "gemm", ""):
+            _apply_v1_to_v2_qzeros(qzeros, bits)
+
         weight_int = unpack_rows(qweight, bits)
         zeros = unpack_cols(qzeros, bits)
 

@@ -13,6 +13,7 @@ from gptqmodel.utils.model import (
     convert_gptq_v1_to_v2_format_module,
     convert_gptq_v2_to_v1_format_module,
 )
+from gptqmodel.utils.model_dequant import _apply_v1_to_v2_qzeros
 
 
 class _TestQuantLinear(BaseQuantLinear):
@@ -99,3 +100,48 @@ def test_qzero_offsets_triangular_patterns():
         module = _make_module(bits=3, pack_dtype=pack_dtype)
         convert_gptq_v1_to_v2_format_module(module=module, bits=3, pack_dtype=pack_dtype)
         assert torch.equal(module.qzeros.data, expected)
+
+
+# ---------------------------------------------------------------------------
+# Tests for _apply_v1_to_v2_qzeros (dequant-path helper)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "bits, pack_dtype",
+    (
+        (2, torch.int8),
+        (2, torch.int32),
+        (4, torch.int16),
+        (4, torch.int32),
+        (8, torch.int32),
+    ),
+)
+@torch.inference_mode()
+def test_dequant_v1_v2_matches_module_path(
+    bits: int, pack_dtype: torch.dtype,
+) -> None:
+    """_apply_v1_to_v2_qzeros must produce identical qzeros as the
+    module-level convert_gptq_v1_to_v2_format_module."""
+    # Module path (reference).
+    module = _make_module(bits=bits, pack_dtype=pack_dtype)
+    convert_gptq_v1_to_v2_format_module(
+        module=module, bits=bits, pack_dtype=pack_dtype,
+    )
+    expected = module.qzeros.data.clone()
+
+    # Dequant helper path (under test).
+    raw = torch.zeros_like(expected)
+    _apply_v1_to_v2_qzeros(raw, bits)
+
+    assert torch.equal(raw, expected), (
+        f"bits={bits} dtype={pack_dtype}: "
+        f"dequant helper {raw} != module path {expected}"
+    )
+
+
+@torch.inference_mode()
+def test_dequant_v1_v2_3bit_raises() -> None:
+    """3-bit is not yet implemented in the dequant helper."""
+    qzeros = torch.zeros((1, 3), dtype=torch.int32)
+    with pytest.raises(NotImplementedError, match="3-bit"):
+        _apply_v1_to_v2_qzeros(qzeros, 3)
