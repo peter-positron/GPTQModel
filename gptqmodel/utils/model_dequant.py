@@ -11,6 +11,7 @@ import json
 import logging
 import shutil
 from collections import defaultdict
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, Iterable, Optional, Tuple
 
@@ -23,6 +24,9 @@ from ..utils.logger import setup_logger
 
 
 LOG = logging.getLogger(__name__)
+
+CROSS_SHARD_DEQUANT_SUPPORTED = True
+V1_TO_V2_QZEROS_SUPPORTED = True
 
 if TYPE_CHECKING:
     from compressed_tensors.compressors.base import BaseCompressor
@@ -349,6 +353,15 @@ def detect_format(model_path: Path, config: dict) -> str:
             return "fp8"
         if any(k.endswith(".qweight") for k in keys):
             has_g = any(k.endswith(".g_idx") for k in keys)
+            if not has_g and method in ("gptq", "gptqmodel"):
+                # g_idx may live in a different shard for large MoE models.
+                LOG.debug(
+                    "Detected GPTQ format via qweight in shard '%s' + quant_method=%s "
+                    "(g_idx not in first shard, likely cross-shard)",
+                    files[0],
+                    method,
+                )
+                return "gptq"
             LOG.debug(
                 "Detected %s format via qweight tensors in shard '%s'",
                 "gptq" if has_g else "awq",
@@ -573,6 +586,161 @@ def _apply_v1_to_v2_qzeros(
     qzeros.data += offset
 
 
+# -- Cross-shard GPTQ dequantization helpers ----------------------------
+#
+# Large MoE models may split GPTQ buffers for the same module across
+# multiple safetensors shards (e.g., g_idx in shard 2 while qweight,
+# qzeros, and scales live in shard 1).  The per-shard convert_gptq_file()
+# path cannot handle this.  The helpers below pre-scan all shards to map
+# buffer locations, then load from the correct shards during dequant.
+
+_GPTQ_BUFFER_SUFFIXES: dict[str, str] = {
+    ".qweight": "qweight",
+    ".qzeros": "qzeros",
+    ".scales": "scales",
+    ".g_idx": "g_idx",
+}
+_GPTQ_REQUIRED_BUFFERS = frozenset(_GPTQ_BUFFER_SUFFIXES.values())
+
+
+@dataclass
+class GptqShardPlan:
+    """Map of GPTQ module buffer locations across shards.
+
+    ``module_buffers`` maps each module prefix to a dict of buffer name
+    to ``(shard_filename, tensor_key)``.  ``passthrough`` maps non-GPTQ
+    tensor keys to the shard that contains them.
+    """
+
+    module_buffers: dict[str, dict[str, tuple[str, str]]]
+    passthrough: dict[str, str]
+
+
+def _build_gptq_cross_shard_plan(
+    model_path: Path,
+    shard_files: list[str],
+) -> GptqShardPlan:
+    """Scan all shards to map GPTQ buffer locations.
+
+    Opens each shard to read keys only (no tensors loaded), classifies
+    each key as a GPTQ buffer or passthrough, and validates that every
+    module has all four required buffers.
+    """
+    module_buffers: dict[str, dict[str, tuple[str, str]]] = defaultdict(dict)
+    passthrough: dict[str, str] = {}
+
+    for filename in shard_files:
+        with safe_open(
+            model_path / filename, framework="pt", device="cpu",
+        ) as reader:
+            for key in reader.keys():
+                matched = False
+                for suffix, buf_name in _GPTQ_BUFFER_SUFFIXES.items():
+                    if key.endswith(suffix):
+                        prefix = key[: -len(suffix)]
+                        module_buffers[prefix][buf_name] = (filename, key)
+                        matched = True
+                        break
+                if not matched:
+                    passthrough[key] = filename
+
+    for prefix, bufs in module_buffers.items():
+        missing = _GPTQ_REQUIRED_BUFFERS - set(bufs)
+        if missing:
+            raise KeyError(
+                f"Incomplete GPTQ buffers for module {prefix}: missing {missing}"
+            )
+
+    return GptqShardPlan(
+        module_buffers=dict(module_buffers),
+        passthrough=passthrough,
+    )
+
+
+def _execute_gptq_dequant(
+    plan: GptqShardPlan,
+    model_path: Path,
+    quant_cfg: dict,
+    target_dtype: torch.dtype,
+    device: str,
+    log,
+) -> dict[str, dict[str, torch.Tensor]]:
+    """Dequantize GPTQ modules using a cross-shard buffer plan.
+
+    Returns ``{shard_filename: {tensor_name: tensor}}`` for the caller
+    to write.  Dequantized weights are placed in the shard where their
+    ``qweight`` lived; passthrough tensors stay in their original shard.
+    """
+    bits = quant_cfg.get("bits", 4)
+    ckpt_fmt = quant_cfg.get("checkpoint_format", "gptq")
+
+    output: dict[str, dict[str, torch.Tensor]] = defaultdict(dict)
+    shard_cache: dict[str, dict[str, torch.Tensor]] = {}
+
+    def _load_tensor(filename: str, key: str) -> torch.Tensor:
+        if filename not in shard_cache:
+            path = model_path / filename
+            with safe_open(path, framework="pt", device=device) as reader:
+                shard_cache[filename] = {
+                    k: reader.get_tensor(k) for k in reader.keys()
+                }
+        return shard_cache[filename][key]
+
+    n_modules = len(plan.module_buffers)
+    pb = (
+        log.pb(range(n_modules))
+        .manual()
+        .set(show_left_steps=False)
+        .title("Dequantizing (gptq)")
+    )
+    pb.draw()
+
+    try:
+        for prefix, buf_locs in plan.module_buffers.items():
+            qw_file, qw_key = buf_locs["qweight"]
+            qz_file, qz_key = buf_locs["qzeros"]
+            sc_file, sc_key = buf_locs["scales"]
+            gi_file, gi_key = buf_locs["g_idx"]
+
+            qweight = _load_tensor(qw_file, qw_key)
+            qzeros = _load_tensor(qz_file, qz_key).clone()
+            scales = _load_tensor(sc_file, sc_key)
+            g_idx = _load_tensor(gi_file, gi_key).to(torch.long)
+
+            if ckpt_fmt in ("gptq", "gemm", ""):
+                _apply_v1_to_v2_qzeros(qzeros, bits)
+
+            weight_int = unpack_rows(qweight, bits)
+            zeros = unpack_cols(qzeros, bits)
+
+            scales_full = scales.to(torch.float32)[g_idx]
+            zeros_full = zeros.to(torch.float32)[g_idx]
+            weight = (weight_int.to(torch.float32) - zeros_full) * scales_full
+
+            output[qw_file][prefix + ".weight"] = finalize_for_save(
+                weight.to(target_dtype).t().contiguous(),
+                target_dtype,
+            )
+            LOG.debug(
+                "Dequantized GPTQ module '%s' (%d-bit) to %s",
+                prefix,
+                bits,
+                target_dtype,
+            )
+            short = prefix.rsplit(".", 1)[-1]
+            pb.subtitle(short).next().draw()
+    finally:
+        pb.close()
+
+    # Passthrough tensors stay in their original shard.
+    for key, filename in plan.passthrough.items():
+        tensor = _load_tensor(filename, key)
+        output[filename][key] = finalize_for_save(tensor, target_dtype)
+
+    shard_cache.clear()
+    return dict(output)
+
+
 def convert_gptq_file(path: Path, target_dtype: torch.dtype, config: dict, device: str) -> Dict[str, torch.Tensor]:
     tensors: Dict[str, torch.Tensor] = {}
     module_buffers: Dict[str, Dict[str, torch.Tensor]] = defaultdict(dict)
@@ -776,45 +944,52 @@ def dequantize_model(
         target_dtype,
         open_device,
     )
-    pb = log.pb(range(len(files))).manual().set(show_left_steps=False).title(f"Dequantizing ({fmt})")
-    pb.draw()
-
     weight_map: Dict[str, str] = {}
     total_size = 0
 
-    try:
-        for idx, filename in enumerate(files):
-            path = model_path / filename
-            LOG.debug("Processing shard '%s' for format %s on device %s", filename, fmt, open_device)
-            if fmt == "fp8":
-                with safe_open(path, framework="pt", device=open_device) as reader:
-                    tensors = convert_fp8_shard(reader, target_dtype, block_shape=block_shape)
-            elif fmt == "nvfp4":
-                with safe_open(path, framework="pt", device=open_device) as reader:
-                    tensors = convert_nvfp4_shard(reader, target_dtype)
-            elif fmt == "awq":
-                tensors = convert_awq_file(path, target_dtype, open_device)
-            elif fmt == "gptq":
-                tensors = convert_gptq_file(path, target_dtype, quant_cfg, open_device)
-            elif fmt == "compressed-pack":
-                if compressed_compressor is None:
-                    raise RuntimeError("Compressed-tensors compressor was not initialized")
-                tensors = convert_compressed_pack_file(
-                    path,
-                    target_dtype,
-                    device=open_device,
-                    module_to_scheme=compressed_module_to_scheme,
-                    compressor=compressed_compressor,
-                )
-            else:
-                raise ValueError(f"Unsupported format {fmt}")
-
+    if fmt == "gptq":
+        plan = _build_gptq_cross_shard_plan(model_path, files)
+        shard_tensors = _execute_gptq_dequant(
+            plan, model_path, quant_cfg, target_dtype, open_device, log,
+        )
+        for filename, tensors in shard_tensors.items():
             save_file(tensors, str(output_path / filename))
             weight_map.update({str(name): filename for name in tensors})
             total_size += sum(t.element_size() * t.numel() for t in tensors.values())
-            pb.subtitle(filename).next().draw()
-    finally:
-        pb.close()
+    else:
+        pb = log.pb(range(len(files))).manual().set(show_left_steps=False).title(f"Dequantizing ({fmt})")
+        pb.draw()
+        try:
+            for idx, filename in enumerate(files):
+                path = model_path / filename
+                LOG.debug("Processing shard '%s' for format %s on device %s", filename, fmt, open_device)
+                if fmt == "fp8":
+                    with safe_open(path, framework="pt", device=open_device) as reader:
+                        tensors = convert_fp8_shard(reader, target_dtype, block_shape=block_shape)
+                elif fmt == "nvfp4":
+                    with safe_open(path, framework="pt", device=open_device) as reader:
+                        tensors = convert_nvfp4_shard(reader, target_dtype)
+                elif fmt == "awq":
+                    tensors = convert_awq_file(path, target_dtype, open_device)
+                elif fmt == "compressed-pack":
+                    if compressed_compressor is None:
+                        raise RuntimeError("Compressed-tensors compressor was not initialized")
+                    tensors = convert_compressed_pack_file(
+                        path,
+                        target_dtype,
+                        device=open_device,
+                        module_to_scheme=compressed_module_to_scheme,
+                        compressor=compressed_compressor,
+                    )
+                else:
+                    raise ValueError(f"Unsupported format {fmt}")
+
+                save_file(tensors, str(output_path / filename))
+                weight_map.update({str(name): filename for name in tensors})
+                total_size += sum(t.element_size() * t.numel() for t in tensors.values())
+                pb.subtitle(filename).next().draw()
+        finally:
+            pb.close()
 
     if index is not None:
         new_index = dict(index)
