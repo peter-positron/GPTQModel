@@ -144,10 +144,10 @@ class GptOssTopKRouterNew(nn.Module):
         router_logits = F.linear(hidden_states, self.weight.to(hidden_states.dtype), self.bias.to(hidden_states.dtype))  # (seq_len, num_experts)
         router_top_value, router_indices = torch.topk(router_logits, self.top_k, dim=-1)  # (seq_len, top_k)
         router_top_value = torch.nn.functional.softmax(router_top_value, dim=1, dtype=router_top_value.dtype)
-        router_scores = torch.zeros_like(router_logits).scatter_(1, router_indices, router_top_value)
-        # Return 3 values to match original GptOssTopKRouter interface
-        # expected by GptOssMLP.forward(): (logits, scores, indices)
-        return router_logits, router_scores, router_indices
+        router_scores = torch.zeros_like(router_logits).scatter_(
+            1, router_indices, router_top_value,
+        )
+        return router_scores, router_indices
 
 class GPTOSSGPTQ(BaseQModel):
     # Disable shell/turtle disk offload — the default materialization
