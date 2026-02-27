@@ -2,12 +2,18 @@
 # SPDX-FileCopyrightText: 2024-2025 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
+import json
+from pathlib import Path
+
 import torch
 import torch.nn.functional as F
 from torch import nn
 
 from ..base import BaseQModel
 from ..expert_restack import ExpertRestackSpec
+from ...utils.logger import setup_logger
+
+log = setup_logger()
 
 
 class GptOssExpertsNew(nn.Module):
@@ -189,9 +195,184 @@ class GPTOSSGPTQ(BaseQModel):
         },
     ]
 
+    # Stacked-key mapping: (stacked_name, suffix_overrides) per spec.
+    # Used by _repair_stacked_experts to reverse the restack transform.
+    _EXPERT_GROUPS = [
+        ("gate_up_proj", "gate_up", {"weight": "", "bias": "_bias"}),
+        ("down_proj", "down", {"weight": "", "bias": "_bias"}),
+    ]
+
+    # GPTQ buffer names that get stacked without suffix override
+    _GPTQ_SUFFIXES = ("qweight", "qzeros", "scales", "g_idx")
+
     def before_model_load(self, load_quantized_model=False):
         if load_quantized_model:
-            import transformers.models.gpt_oss.modeling_gpt_oss as gpt_oss_modeling
+            import transformers.models.gpt_oss.modeling_gpt_oss as m
 
-            gpt_oss_modeling.GptOssExperts = GptOssExpertsNew
-            gpt_oss_modeling.GptOssTopKRouter = GptOssTopKRouterNew
+            m.GptOssExperts = GptOssExpertsNew
+            m.GptOssTopKRouter = GptOssTopKRouterNew
+
+    def after_model_load(self, model, load_quantized_model=False):
+        if load_quantized_model:
+            self._repair_stacked_experts_if_needed(model)
+        return model
+
+    def _repair_stacked_experts_if_needed(self, model):
+        """Load stacked expert tensors into per-expert modules.
+
+        The save path restacks per-expert keys into HF stacked
+        format (gate_up.{i}.qweight -> gate_up_proj.qweight[E,...]).
+        The load path creates per-expert TorchQuantLinear modules
+        that accelerate cannot populate from stacked keys. This
+        method detects the mismatch and backfills expert weights.
+        """
+        # Probe layer 0 expert 0 to decide if repair is needed
+        layers = model.model.layers
+        probe = layers[0].mlp.experts.gate_up[0]
+        if not hasattr(probe, "qweight"):
+            return  # not quantized (float model), nothing to do
+        if probe.qweight.abs().max().item() > 0:
+            return  # already loaded correctly (per-expert checkpoint)
+
+        model_dir = self._resolve_checkpoint_dir(model)
+        if model_dir is None:
+            log.warning(
+                "Expert repair: cannot locate checkpoint directory"
+            )
+            return
+
+        tensor_map = self._build_shard_map(model_dir)
+        if not tensor_map:
+            log.warning(
+                "Expert repair: no safetensors files found in %s",
+                model_dir,
+            )
+            return
+
+        num_experts = model.config.num_local_experts
+        num_layers = model.config.num_hidden_layers
+        repaired = 0
+
+        for layer_idx in range(num_layers):
+            experts = layers[layer_idx].mlp.experts
+            prefix = f"model.layers.{layer_idx}.mlp.experts"
+
+            for stacked_name, ml_attr, suf_map in self._EXPERT_GROUPS:
+                module_list = getattr(experts, ml_attr)
+
+                for suffix in self._GPTQ_SUFFIXES:
+                    # Stacked key: prefix.gate_up_proj.qweight
+                    stacked_key = f"{prefix}.{stacked_name}.{suffix}"
+                    stacked = self._load_tensor(
+                        stacked_key, tensor_map, model_dir,
+                    )
+                    if stacked is None:
+                        continue
+                    if stacked.dim() < 2:
+                        continue
+                    # Slice: [E, ...] -> per-expert 2D
+                    for i in range(num_experts):
+                        sliced = stacked[i].contiguous()
+                        buf = getattr(module_list[i], suffix, None)
+                        if buf is not None:
+                            buf.data.copy_(sliced)
+                            repaired += 1
+
+                # Bias uses suffix override: gate_up_proj_bias
+                bias_suffix = suf_map.get("bias")
+                if bias_suffix is not None:
+                    bias_key = f"{prefix}.{stacked_name}{bias_suffix}"
+                    stacked_bias = self._load_tensor(
+                        bias_key, tensor_map, model_dir,
+                    )
+                    if stacked_bias is not None and stacked_bias.dim() >= 1:
+                        for i in range(num_experts):
+                            mod = module_list[i]
+                            if hasattr(mod, "bias") and mod.bias is not None:
+                                mod.bias.data.copy_(stacked_bias[i])
+                                repaired += 1
+
+        if repaired > 0:
+            self._apply_v1_to_v2_on_experts(model)
+            log.info(
+                "Expert repair: loaded %d stacked tensors into "
+                "per-expert modules via stacked->per-expert bridge",
+                repaired,
+            )
+
+    def _apply_v1_to_v2_on_experts(self, model):
+        """Apply V1->V2 qzeros correction on repaired expert modules.
+
+        The main V1->V2 pass runs before after_model_load, but expert
+        qzeros were all zeros at that point. Now that real values are
+        loaded, apply the correction.
+        """
+        from ...nn_modules.qlinear import BaseQuantLinear
+        from ...utils.model import convert_gptq_v1_to_v2_format_module
+
+        qcfg = self.quantize_config
+        kernel = self.qlinear_kernel
+        if kernel is None or not getattr(kernel, "REQUIRES_FORMAT_V2", False):
+            return
+
+        for layer in model.model.layers:
+            experts = layer.mlp.experts
+            for ml_attr in ("gate_up", "down"):
+                for mod in getattr(experts, ml_attr):
+                    if isinstance(mod, BaseQuantLinear):
+                        convert_gptq_v1_to_v2_format_module(
+                            module=mod,
+                            bits=qcfg.bits,
+                            pack_dtype=qcfg.pack_dtype,
+                        )
+
+    @staticmethod
+    def _resolve_checkpoint_dir(model):
+        """Find the directory containing safetensors shards."""
+        ckpt = getattr(model, "checkpoint_file_name", None)
+        if ckpt is None:
+            return None
+        p = Path(ckpt)
+        if p.is_file():
+            return p.parent
+        if p.is_dir():
+            return p
+        return None
+
+    @staticmethod
+    def _build_shard_map(model_dir: Path):
+        """Return {tensor_key: shard_filename} for all safetensors."""
+        index_file = model_dir / "model.safetensors.index.json"
+        if index_file.exists():
+            with open(index_file) as f:
+                index = json.load(f)
+            return index.get("weight_map", {})
+
+        # Single-file model
+        single = model_dir / "model.safetensors"
+        if single.exists():
+            from safetensors import safe_open
+
+            with safe_open(str(single), framework="pt") as f:
+                return {k: "model.safetensors" for k in f.keys()}
+        # Try any .safetensors file
+        for sf in sorted(model_dir.glob("*.safetensors")):
+            from safetensors import safe_open
+
+            with safe_open(str(sf), framework="pt") as f:
+                return {k: sf.name for k in f.keys()}
+        return {}
+
+    @staticmethod
+    def _load_tensor(key, tensor_map, model_dir):
+        """Load a single tensor from the correct shard file."""
+        shard_name = tensor_map.get(key)
+        if shard_name is None:
+            return None
+        from safetensors import safe_open
+
+        shard_path = model_dir / shard_name
+        with safe_open(str(shard_path), framework="pt") as f:
+            if key in f.keys():
+                return f.get_tensor(key)
+        return None
