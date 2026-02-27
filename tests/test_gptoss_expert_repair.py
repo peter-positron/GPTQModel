@@ -278,7 +278,18 @@ def test_expert_repair_loads_stacked_tensors():
             assert torch.equal(
                 d.qweight, src[f"{pfx}.down_proj.qweight"][i],
             ), f"down[{i}].qweight mismatch"
+            assert torch.equal(
+                d.scales, src[f"{pfx}.down_proj.scales"][i],
+            ), f"down[{i}].scales mismatch"
+            assert torch.equal(
+                d.qzeros, src[f"{pfx}.down_proj.qzeros"][i],
+            ), f"down[{i}].qzeros mismatch"
+            assert torch.allclose(
+                d.bias.data, src[f"{pfx}.down_proj_bias"][i],
+            ), f"down[{i}].bias mismatch"
             assert d.qweight.abs().max().item() > 0
+            assert d.scales.abs().max().item() > 0
+            assert gu.scales.abs().max().item() > 0
 
 
 def test_expert_repair_noop_when_already_loaded():
