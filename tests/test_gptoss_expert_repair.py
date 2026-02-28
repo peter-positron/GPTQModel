@@ -1,5 +1,4 @@
-"""Test that stacked expert checkpoint tensors are correctly
-unstacked into per-expert modules during load.
+"""GPT-OSS expert repair + router arity regression tests.
 
 Pure unit test: requires only torch + safetensors.  Does NOT import
 gptqmodel/__init__.py or any heavy dep (triton, accelerate, etc.).
@@ -313,3 +312,36 @@ def test_expert_repair_noop_when_already_loaded():
             model.model.layers[0].mlp.experts.gate_up[0].qweight,
             sentinel,
         ), "Repair should be no-op when weights already loaded"
+
+
+def test_router_returns_two_values():
+    """GptOssTopKRouterNew.forward() must return exactly 2 values
+    (scores, indices) to match HF GptOssMLP.forward() unpacking."""
+    GptOssTopKRouterNew = _gpt_oss.GptOssTopKRouterNew
+
+    config = SimpleNamespace(
+        num_experts_per_tok=2,
+        num_local_experts=NUM_EXPERTS,
+        hidden_size=HIDDEN,
+    )
+    router = GptOssTopKRouterNew(config)
+    # Init weights so forward doesn't produce garbage
+    torch.nn.init.normal_(router.weight)
+    torch.nn.init.zeros_(router.bias)
+
+    hidden = torch.randn(1, 4, HIDDEN)
+    with torch.no_grad():
+        out = router(hidden)
+
+    assert isinstance(out, tuple), (
+        f"Router should return tuple, got {type(out)}"
+    )
+    assert len(out) == 2, (
+        f"Router must return 2 values (scores, indices),"
+        f" got {len(out)}"
+    )
+    scores, indices = out
+    assert indices.dtype in (torch.int64, torch.int32, torch.long)
+    assert indices.min().item() >= 0
+    assert indices.max().item() < NUM_EXPERTS
+    assert scores.shape[-1] == NUM_EXPERTS

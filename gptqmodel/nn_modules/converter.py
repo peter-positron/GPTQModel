@@ -22,10 +22,8 @@ def convert_gpt_oss_expert_converter(module, config):
         def forward(self, hidden_states):
             import torch
 
-            # Original GptOssTopKRouter returns (logits, scores, indices)
-            # with 3D shapes (batch, seq, experts) because it doesn't flatten.
-            # GptOssTopKRouterNew returns (scores, indices) with 2D shapes
-            # (flat_tokens, experts) because it reshapes first.
+            # HF router returns (scores, indices). Some forks
+            # returned (logits, scores, indices); handle both.
             # GptOssExpertsNew expects the 2D scattered format.
             router_out = self.router(hidden_states)
             if len(router_out) == 3:
