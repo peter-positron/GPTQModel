@@ -1543,6 +1543,10 @@ class BaseQModel(nn.Module):
         # load there (issue #1455).
         self._warn_fused_unit_dynamic_overrides()
 
+        # Checkpoint sessions isolate each attempt and derive the automatic checkpoint root from the configured path.
+        if checkpoint is None:
+            self.quantize_config._ensure_offload_run_dir()
+
         if self.quantize_config.uses_weight_only_lifecycle():
             result = self._quantize_weight_only(
                 checkpoint=checkpoint,

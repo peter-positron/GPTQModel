@@ -34,8 +34,8 @@ log = setup_logger()
 class _SharedTemporaryDirectory:
     """Share one TemporaryDirectory handle across copied config objects."""
 
-    def __init__(self, *, prefix: str):
-        self._temp_dir = tempfile.TemporaryDirectory(prefix=prefix)
+    def __init__(self, *, prefix: str, dir: Optional[str] = None):
+        self._temp_dir = tempfile.TemporaryDirectory(prefix=prefix, dir=dir)
 
     @property
     def name(self) -> str:
@@ -3435,6 +3435,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
         metadata={"help": "Offload disk path. Only applicable if Offload to disk is enabled"},
     )
     _offload_temp_dir: Optional[_SharedTemporaryDirectory] = field(default=None, init=False, repr=False, compare=False)
+    _offload_root: Optional[str] = field(default=None, init=False, repr=False, compare=False)
 
     rotation: Optional[str] = field(default=None, metadata={"choices": ["hadamard", "random"]})
 
@@ -3620,6 +3621,16 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             self._offload_temp_dir = _create_temp_offload_dir()
             self.offload_to_disk_path = self._offload_temp_dir.name
             log.info(f"QuantizeConfig: offload_to_disk_path auto set to temporary dir `{self.offload_to_disk_path}`")
+
+    def _ensure_offload_run_dir(self) -> None:
+        # Runs sharing an explicit root must not read back each other's offloaded modules on save.
+        owned = self._offload_temp_dir is not None and self.offload_to_disk_path == self._offload_temp_dir.name
+        if self.offload_to_disk and self.offload_to_disk_path and not owned:
+            self._offload_root = os.fspath(self.offload_to_disk_path)
+            os.makedirs(self._offload_root, exist_ok=True)
+            self._offload_temp_dir = _SharedTemporaryDirectory(prefix="gptqmodel_", dir=self._offload_root)
+            self.offload_to_disk_path = self._offload_temp_dir.name
+            log.info(f"QuantizeConfig: offload_to_disk_path set to run dir `{self.offload_to_disk_path}`")
 
     def __post_init__(self):
         fields_info = fields(self)
@@ -4090,7 +4101,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
 
         meta_payload["offload_to_disk"] = self.offload_to_disk
         meta_payload["telemetry"] = asdict(self.telemetry)
-        meta_payload["offload_to_disk_path"] = self.offload_to_disk_path
+        meta_payload["offload_to_disk_path"] = self._offload_root or self.offload_to_disk_path
         meta_payload["pack_impl"] = self.pack_impl
         meta_payload["gc_mode"] = self.gc_mode.value if isinstance(self.gc_mode, GcMode) else self.gc_mode
         meta_payload["wait_for_submodule_finalizers"] = self.wait_for_submodule_finalizers
