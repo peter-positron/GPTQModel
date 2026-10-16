@@ -46,6 +46,7 @@ _CHECKPOINT_IDENTITY_VERSION = 2
 _IDENTITY_EXCLUDED_CONFIG_FIELDS = {
     "offload_to_disk_path",
     "_offload_temp_dir",
+    "_offload_root",
     "telemetry",
 }
 
@@ -153,7 +154,9 @@ def checkpoint_session(config, model):
         )
     if not model.quantize_config.offload_to_disk:
         raise ValueError("checkpoint requires quantize_config.offload_to_disk=True")
-    checkpoint_root = config.resolve_path(model.quantize_config.offload_to_disk_path)
+    checkpoint_root = config.resolve_path(
+        getattr(model.quantize_config, "_offload_root", None) or model.quantize_config.offload_to_disk_path
+    )
     if config.path == "auto":
         # The automatic checkpoint location follows the existing disk-offload
         # root. An explicit path remains independent and can be durable across
